@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""
+Repo Clone Tool - Clone and organize git repositories with submodule support.
+
+Usage: repo-clone [OPTIONS] <url>
+
+This script clones repositories organized under:
+    $HOME/<hosting_shortcode>/<username>/<repo>
+
+Examples:
+    repo-clone git@github.com:user/repo.git
+    repo-clone https://github.com/user/repo
+    repo-clone https://huggingface.co/TheBloke/model
+    repo-clone --shallow https://github.com/user/large-repo
+
+Features:
+    - Automatic submodule initialization (--recursive by default)
+    - Updates existing repos with fetch/pull and submodule sync
+    - Fixes repos that were cloned without submodules
+    - Special handling for Hugging Face (git lfs)
+"""
+
+import sys
+import subprocess
+import argparse
+import os
+import re
+from pathlib import Path
+from urllib.parse import urlparse
+from dataclasses import dataclass, field
+from typing import Optional, List, Tuple
+
+
+# Exit codes
+class ExitCode:
+    SUCCESS = 0
+    INVALID_URL = 1
+    CLONE_FAILED = 2
+    UPDATE_FAILED = 3
+    SUBMODULE_FAILED = 4
+    PERMISSION_ERROR = 5
+    GIT_LFS_FAILED = 6
+
+
+# Global verbosity
+VERBOSE = False
+
+
+def log_info(msg: str) -> None:
+    """Log informational message to stderr."""
+    if VERBOSE:
+        print(f"INFO: {msg}", file=sys.stderr)
+
+
+def log_warn(msg: str) -> None:
+    """Log warning message to stderr."""
+    print(f"WARN: {msg}", file=sys.stderr)
+
+
+def log_error(msg: str) -> None:
+    """Log error message to stderr."""
+    print(f"ERROR: {msg}", file=sys.stderr)
+
+
+def error_exit(msg: str, code: int = 1) -> None:
+    """Print error and exit."""
+    log_error(msg)
+    sys.exit(code)
+
+
+@dataclass
+class RepoInfo:
+    """Parsed repository information."""
+    hosting: str              # Full hosting domain (e.g., "github.com")
+    shortcode: str            # Short name (e.g., "github")
+    username: str             # User or organization name
+    repo: str                 # Repository name (without .git)
+    is_ssh: bool              # True if SSH URL format
+    is_huggingface: bool      # True if Hugging Face repo
+    original_url: str         # Original URL for reference
+
+
+@dataclass
+class CloneOptions:
+    """Options controlling clone/update behavior."""
+    recursive: bool = True        # Clone with --recursive
+    shallow: bool = False         # Use --depth 1
+    depth: int = 1                # Shallow clone depth
+    base_dir: Optional[Path] = None  # Base directory (default: $HOME)
+    verbose: bool = False         # Show git commands
+    dry_run: bool = False         # Show what would be done
+
+
+def extract_hosting_shortcode(hosting: str) -> str:
+    """
+    Extract shortcode from hosting domain.
+
+    Examples:
+        github.com -> github
+        gitlab.example.org -> gitlab
+        huggingface.co -> huggingface
+    """
+    return hosting.split('.')[0]
+
+
+def is_huggingface_url(url: str) -> bool:
+    """Check if URL is a Hugging Face repository."""
+    return url.startswith("https://huggingface.co/")
+
+
+def parse_git_url(url: str) -> RepoInfo:
+    """
+    Parse various git URL formats into normalized RepoInfo.
+
+    Supported formats:
+    - SSH: git@github.com:user/repo.git
+    - HTTPS: https://github.com/user/repo.git
+    - HTTPS without .git: https://github.com/user/repo
+    - Hugging Face: https://huggingface.co/user/repo
+
+    Returns:
+        RepoInfo with parsed components
+
+    Raises:
+        ValueError: If URL format is not recognized
+    """
+    original_url = url
+
+    # Check for Hugging Face first
+    if is_huggingface_url(url):
+        path = url.removeprefix("https://huggingface.co/")
+        parts = path.strip('/').split('/')
+        if len(parts) < 2:
+            raise ValueError(f"Invalid Hugging Face URL: {url}")
+        username = parts[0]
+        repo = parts[1].removesuffix('.git')
+        return RepoInfo(
+            hosting="huggingface.co",
+            shortcode="huggingface.co",  # Keep full domain for HF
+            username=username,
+            repo=repo,
+            is_ssh=False,
+            is_huggingface=True,
+            original_url=original_url
+        )
+
+    # Check for SSH format: git@host:user/repo.git
+    ssh_match = re.match(r'^(?:ssh://)?git@([^:/]+)[:/](.+)$', url)
+    if ssh_match:
+        hosting = ssh_match.group(1)
+        path = ssh_match.group(2)
+        parts = path.strip('/').split('/')
+        if len(parts) < 2:
+            raise ValueError(f"Cannot extract user/repo from SSH URL: {url}")
+        username = parts[0]
+        repo = parts[1].removesuffix('.git')
+        return RepoInfo(
+            hosting=hosting,
+            shortcode=extract_hosting_shortcode(hosting),
+            username=username,
+            repo=repo,
+            is_ssh=True,
+            is_huggingface=False,
+            original_url=original_url
+        )
+
+    # Parse as HTTPS URL
+    if url.startswith(('http://', 'https://')):
+        parsed = urlparse(url)
+        hosting = parsed.netloc
+        path_parts = parsed.path.strip('/').split('/')
+        if len(path_parts) < 2:
+            raise ValueError(f"Cannot extract user/repo from HTTPS URL: {url}")
+        username = path_parts[0]
+        repo = path_parts[1].removesuffix('.git')
+        return RepoInfo(
+            hosting=hosting,
+            shortcode=extract_hosting_shortcode(hosting),
+            username=username,
+            repo=repo,
+            is_ssh=False,
+            is_huggingface=False,
+            original_url=original_url
+        )
+
+    raise ValueError(
+        f"Unrecognized URL format: {url}\n"
+        "Expected formats:\n"
+        "  SSH:   git@github.com:user/repo.git\n"
+        "  HTTPS: https://github.com/user/repo.git\n"
+        "  HF:    https://huggingface.co/user/model"
+    )
+
+
+def normalize_clone_url(info: RepoInfo) -> str:
+    """Reconstruct a normalized clone URL from RepoInfo."""
+    if info.is_huggingface:
+        return f"https://huggingface.co/{info.username}/{info.repo}"
+    elif info.is_ssh:
+        return f"git@{info.hosting}:{info.username}/{info.repo}.git"
+    else:
+        return f"https://{info.hosting}/{info.username}/{info.repo}.git"
+
+
+def run_git(
+    args: List[str],
+    cwd: Optional[Path] = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+    check: bool = True
+) -> subprocess.CompletedProcess:
+    """
+    Execute a git command with proper error handling.
+
+    Args:
+        args: Git command arguments (without 'git' prefix)
+        cwd: Working directory for the command
+        verbose: If True, print the command before execution
+        dry_run: If True, only print what would be done
+        check: If True, raise on non-zero exit code
+
+    Returns:
+        CompletedProcess with stdout/stderr captured
+    """
+    cmd = ["git"] + args
+
+    if verbose or dry_run:
+        cwd_str = f" (in {cwd})" if cwd else ""
+        print(f"$ {' '.join(cmd)}{cwd_str}", file=sys.stderr)
+
+    if dry_run:
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True
+    )
+
+    if check and result.returncode != 0:
+        log_error(f"Git command failed: {' '.join(cmd)}")
+        if result.stderr:
+            log_error(result.stderr.strip())
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, result.stdout, result.stderr
+        )
+
+    return result
+
+
+def check_local_changes(repo_path: Path) -> Tuple[bool, str]:
+    """
+    Check if repository has uncommitted changes.
+
+    Returns:
+        (has_changes: bool, details: str)
+    """
+    try:
+        result = run_git(
+            ["status", "--porcelain"],
+            cwd=repo_path,
+            check=False
+        )
+        changes = result.stdout.strip()
+        return (bool(changes), changes)
+    except Exception as e:
+        return (False, str(e))
+
+
+def init_submodules(repo_path: Path, options: CloneOptions) -> int:
+    """
+    Initialize and update submodules for an existing repository.
+
+    This is the key function for fixing repos cloned without --recursive.
+
+    Returns:
+        0 on success, non-zero on failure
+    """
+    exit_code = ExitCode.SUCCESS
+
+    # Sync submodule URLs (handles URL changes in .gitmodules)
+    try:
+        run_git(
+            ["submodule", "sync", "--recursive"],
+            cwd=repo_path,
+            verbose=options.verbose,
+            dry_run=options.dry_run,
+            check=False
+        )
+    except Exception:
+        log_warn("Submodule sync had issues (may be ok if no submodules)")
+
+    # Init and update all submodules (this initializes missing ones too)
+    try:
+        update_args = ["submodule", "update", "--init", "--recursive"]
+        run_git(
+            update_args,
+            cwd=repo_path,
+            verbose=options.verbose,
+            dry_run=options.dry_run
+        )
+        log_info("Submodules initialized/updated successfully")
+    except subprocess.CalledProcessError:
+        log_warn("Submodule update had issues (some submodules may have failed)")
+        exit_code = ExitCode.SUBMODULE_FAILED
+
+    return exit_code
+
+
+def update_repo(repo_path: Path, options: CloneOptions) -> int:
+    """
+    Update an existing repository, including submodules.
+
+    Steps:
+    1. git fetch (--recurse-submodules if recursive)
+    2. Check for local changes
+    3. If clean: git pull
+    4. If dirty: warn and skip pull
+    5. git submodule sync --recursive
+    6. git submodule update --init --recursive
+
+    Returns:
+        0 on success, non-zero on failure
+    """
+    exit_code = ExitCode.SUCCESS
+
+    print(f"Updating existing repository: {repo_path}")
+
+    # Fetch (with submodules if recursive)
+    fetch_args = ["fetch"]
+    if options.recursive:
+        fetch_args.append("--recurse-submodules")
+
+    try:
+        run_git(
+            fetch_args,
+            cwd=repo_path,
+            verbose=options.verbose,
+            dry_run=options.dry_run
+        )
+        log_info("Fetch completed")
+    except subprocess.CalledProcessError:
+        log_warn("Fetch failed, continuing with local state...")
+
+    # Check for local changes
+    has_changes, details = check_local_changes(repo_path)
+
+    if has_changes:
+        log_warn(f"Local changes detected, skipping pull:\n{details}")
+    else:
+        # Pull if clean
+        try:
+            run_git(
+                ["pull"],
+                cwd=repo_path,
+                verbose=options.verbose,
+                dry_run=options.dry_run
+            )
+            log_info("Pull completed")
+        except subprocess.CalledProcessError:
+            log_warn("Pull failed (may need manual intervention)")
+            exit_code = ExitCode.UPDATE_FAILED
+
+    # Always handle submodules (this fixes repos cloned without --recursive)
+    if options.recursive:
+        submodule_result = init_submodules(repo_path, options)
+        if submodule_result != ExitCode.SUCCESS and exit_code == ExitCode.SUCCESS:
+            exit_code = submodule_result
+
+    return exit_code
+
+
+def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
+    """
+    Clone repository with submodule support.
+
+    Directory structure: {base_dir}/{shortcode}/{username}/{repo}
+
+    Returns:
+        0 on success, non-zero on failure
+    """
+    base = options.base_dir or Path.home()
+    parent_dir = base / info.shortcode / info.username
+    repo_path = parent_dir / info.repo
+
+    # Check if repo already exists
+    if repo_path.exists():
+        if (repo_path / ".git").exists():
+            log_info(f"Repository exists at: {repo_path}")
+            return update_repo(repo_path, options)
+        else:
+            error_exit(
+                f"Path exists but is not a git repository: {repo_path}",
+                ExitCode.PERMISSION_ERROR
+            )
+
+    # Create parent directory
+    try:
+        if not options.dry_run:
+            parent_dir.mkdir(parents=True, exist_ok=True)
+        log_info(f"Created directory: {parent_dir}")
+    except PermissionError as e:
+        error_exit(f"Cannot create directory {parent_dir}: {e}", ExitCode.PERMISSION_ERROR)
+
+    # Handle Hugging Face LFS
+    if info.is_huggingface:
+        log_info("Hugging Face repository detected, setting up LFS...")
+        try:
+            run_git(
+                ["lfs", "install"],
+                cwd=parent_dir,
+                verbose=options.verbose,
+                dry_run=options.dry_run
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            error_exit(
+                "git-lfs is required for Hugging Face repos.\n"
+                "Install with:\n"
+                "  Arch:   pacman -S git-lfs\n"
+                "  Ubuntu: apt install git-lfs\n"
+                "  macOS:  brew install git-lfs",
+                ExitCode.GIT_LFS_FAILED
+            )
+
+    # Prepare clone command
+    clone_args = ["clone"]
+
+    if options.recursive:
+        clone_args.append("--recursive")
+
+    if options.shallow:
+        clone_args.extend(["--depth", str(options.depth)])
+        if options.recursive:
+            clone_args.append("--shallow-submodules")
+
+    clone_url = normalize_clone_url(info)
+    clone_args.append(clone_url)
+    clone_args.append(info.repo)
+
+    # Execute clone
+    try:
+        print(f"Cloning {clone_url} to {repo_path}")
+        run_git(
+            clone_args,
+            cwd=parent_dir,
+            verbose=options.verbose,
+            dry_run=options.dry_run
+        )
+        print(f"Successfully cloned to: {repo_path}")
+        return ExitCode.SUCCESS
+    except subprocess.CalledProcessError:
+        return ExitCode.CLONE_FAILED
+
+
+def repo_clone(url: str, options: CloneOptions) -> int:
+    """
+    Main logic: clone or update a repository.
+
+    Args:
+        url: Git repository URL
+        options: Clone/update options
+
+    Returns:
+        0 on success, non-zero on failure
+    """
+    try:
+        info = parse_git_url(url)
+        log_info(f"Parsed URL: {info.shortcode}/{info.username}/{info.repo}")
+        return clone_repo(info, options)
+    except ValueError as e:
+        error_exit(str(e), ExitCode.INVALID_URL)
+        return ExitCode.INVALID_URL  # Never reached, but makes type checker happy
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Clone or update git repositories with full submodule support.\n\n"
+                    "Organizes repos under: $HOME/{hosting}/{user}/{repo}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s git@github.com:user/repo.git
+  %(prog)s https://github.com/user/repo
+  %(prog)s https://huggingface.co/TheBloke/model
+  %(prog)s --shallow https://github.com/user/large-repo
+  %(prog)s --no-recursive https://github.com/user/repo
+  %(prog)s --dry-run -v https://github.com/user/repo
+        """
+    )
+
+    parser.add_argument("url", help="Git repository URL (SSH or HTTPS)")
+    parser.add_argument("-n", "--no-recursive", action="store_true",
+                        help="Skip submodule handling")
+    parser.add_argument("-s", "--shallow", action="store_true",
+                        help="Shallow clone (depth 1)")
+    parser.add_argument("--depth", type=int, default=1,
+                        help="Custom depth for shallow clone (default: 1)")
+    parser.add_argument("--base-dir", type=Path,
+                        help="Override $HOME as base directory")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show git commands being executed")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would be done without executing")
+
+    args = parser.parse_args()
+
+    # Environment variable overrides
+    if args.base_dir is None:
+        env_base = os.environ.get("REPO_CLONE_BASE_DIR")
+        if env_base:
+            args.base_dir = Path(env_base)
+
+    if not args.verbose:
+        args.verbose = os.environ.get("REPO_CLONE_VERBOSE") == "1"
+
+    global VERBOSE
+    VERBOSE = args.verbose
+
+    options = CloneOptions(
+        recursive=not args.no_recursive,
+        shallow=args.shallow,
+        depth=args.depth,
+        base_dir=args.base_dir,
+        verbose=args.verbose,
+        dry_run=args.dry_run
+    )
+
+    try:
+        exit_code = repo_clone(args.url, options)
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print("\nInterrupted", file=sys.stderr)
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
