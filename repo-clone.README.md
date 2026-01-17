@@ -1,6 +1,30 @@
 # repo-clone
 
-Clone and organize git repositories with full submodule support.
+**Stop organizing repositories. Start exploring them.**
+
+Ever been GitHub window-shopping? You find one interesting project, which links to another, then a dependency you want to inspect, then a fork with extra features... Before you know it, you've got a dozen browser tabs and the tedious prospect of:
+
+```bash
+mkdir -p ~/repos/someorg && cd ~/repos/someorg && git clone --recursive ...
+```
+
+...for each one. Or worse, everything dumped in `~/Downloads` or a flat `~/projects` folder where nothing is findable later.
+
+**repo-clone** handles the busywork. Drop it in your `$PATH` and paste URLs:
+
+```bash
+while true; do read -p "url: " url; repo-clone "$url"; done
+```
+
+Each repository lands exactly where you'd expect it:
+
+* `~/github/torvalds/linux`
+* `~/gitlab/inkscape/inkscape`
+* `~/huggingface.co/TheBloke/Llama-2-7B-GPTQ`
+
+Submodules initialize automatically. Run it again on an existing repo and it updates cleanly. No thinking required—just copy, paste, explore.
+
+---
 
 ## Overview
 
