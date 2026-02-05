@@ -256,6 +256,35 @@ def normalize_clone_url(info: RepoInfo) -> str:
         return f"https://{info.hosting}/{info.username}/{info.repo}.git"
 
 
+def load_config() -> dict:
+    """
+    Load configuration from ~/.config/shibuido/repo-clone/repo-clone-config.yaml
+
+    Returns empty dict if file doesn't exist or PyYAML not installed.
+    """
+    config_path = Path.home() / ".config" / "shibuido" / "repo-clone" / "repo-clone-config.yaml"
+
+    if not config_path.exists():
+        log_debug(f"No config file at {config_path}")
+        return {}
+
+    try:
+        import yaml
+    except ImportError:
+        log_warn(f"Config file found but PyYAML not installed. Using defaults.\n"
+                 f"  Install with: pip install pyyaml")
+        return {}
+
+    try:
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+        log_debug(f"Loaded config from {config_path}: {config}")
+        return config
+    except Exception as e:
+        log_warn(f"Failed to parse config file: {e}")
+        return {}
+
+
 def run_git(
     args: List[str],
     cwd: Optional[Path] = None,
