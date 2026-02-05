@@ -864,7 +864,15 @@ Examples:
         """
     )
 
-    parser.add_argument("url", help="Git repository URL (SSH or HTTPS)")
+    parser.add_argument("url", nargs="?", default=None,
+                        help="Git repository URL (SSH or HTTPS)")
+    parser.add_argument("-w", "--watch", action="store_true",
+                        help="Watch clipboard for repo URLs (continuous mode)")
+    parser.add_argument("-i", "--interval", type=float, default=0.5,
+                        help="Clipboard polling interval in seconds (default: 0.5)")
+    parser.add_argument("--selection", choices=["clipboard", "primary", "both"],
+                        default="clipboard",
+                        help="Linux clipboard selection (default: clipboard)")
     parser.add_argument("-n", "--no-recursive", action="store_true",
                         help="Skip submodule handling")
     parser.add_argument("-s", "--shallow", action="store_true",
@@ -879,6 +887,12 @@ Examples:
                         help="Show what would be done without executing")
 
     args = parser.parse_args()
+
+    # Validate: either --watch or url required, not both
+    if args.watch and args.url:
+        parser.error("Cannot use --watch with a URL argument")
+    if not args.watch and not args.url:
+        parser.error("Either provide a URL or use --watch mode")
 
     # Environment variable overrides
     if args.base_dir is None:
