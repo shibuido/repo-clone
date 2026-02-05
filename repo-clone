@@ -439,6 +439,22 @@ def extract_repo_url(text: str, extra_hosts: List[str] = None) -> Optional[str]:
     return None
 
 
+def print_status_line(stats: WatchStats, message: str = "") -> None:
+    """
+    Print/update the in-place status line.
+
+    Args:
+        stats: Current watch statistics
+        message: Optional additional message
+    """
+    status = f"\rWatching clipboard... (cloned: {stats.cloned}, skipped: {stats.skipped}, failed: {stats.failed})"
+    if message:
+        status += f" {message}"
+    status += " Ctrl+C to stop"
+    # Clear to end of line and print
+    print(f"{status}\033[K", end="", flush=True, file=sys.stderr)
+
+
 def run_git(
     args: List[str],
     cwd: Optional[Path] = None,
