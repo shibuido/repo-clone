@@ -924,7 +924,28 @@ Examples:
     )
 
     try:
-        exit_code = repo_clone(args.url, options)
+        if args.watch:
+            # Load config file
+            config = load_config()
+
+            # Build WatchConfig with precedence: CLI > config > defaults
+            watch_config = WatchConfig(
+                interval=args.interval if args.interval != 0.5 else config.get("watch_interval", 0.5),
+                selection=args.selection if args.selection != "clipboard" else config.get("watch_selection", "clipboard"),
+                clipboard_command=config.get("clipboard_command"),
+                extra_hosts=config.get("extra_hosts", []),
+            )
+
+            # Override CloneOptions from config if not set by CLI
+            if options.base_dir is None and "base_dir" in config:
+                base_dir_str = config["base_dir"]
+                if base_dir_str.startswith("~"):
+                    base_dir_str = os.path.expanduser(base_dir_str)
+                options.base_dir = Path(base_dir_str)
+
+            exit_code = watch_clipboard(options, watch_config)
+        else:
+            exit_code = repo_clone(args.url, options)
         sys.exit(exit_code)
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
