@@ -115,6 +115,51 @@ repo-clone --base-dir /data/repos https://github.com/user/repo
 REPO_CLONE_BASE_DIR=/data/repos repo-clone https://github.com/user/repo
 ```
 
+## Watch Mode
+
+Monitor your clipboard for repository URLs and automatically clone them:
+
+```bash
+# Basic watch mode
+repo-clone --watch
+
+# With shallow clones
+repo-clone --watch --shallow
+
+# Custom polling interval (250ms)
+repo-clone --watch -i 0.25
+
+# Monitor both clipboards on Linux (primary + clipboard)
+repo-clone --watch --selection both
+
+# Test URL detection without cloning
+repo-clone --watch --dry-run -v
+```
+
+Watch mode recognizes URLs from: GitHub, GitLab, Codeberg, Bitbucket, Hugging Face, SourceHut.
+
+**Want support for another host?** Open an issue or PR!
+
+### Configuration
+
+Create `~/.config/shibuido/repo-clone/repo-clone-config.yaml`:
+
+```yaml
+# Additional hosts to recognize
+extra_hosts:
+  - gitlab.mycompany.com
+  - gitea.internal.org
+
+# Watch mode defaults
+watch_interval: 0.5
+watch_selection: clipboard  # clipboard | primary | both
+
+# Override clipboard command (optional)
+# clipboard_command: "xclip -selection clipboard -o"
+```
+
+Requires `pyyaml` for config file support: `pip install pyyaml`
+
 ## Behavior
 
 ### New Repository
