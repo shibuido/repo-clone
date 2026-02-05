@@ -26,6 +26,8 @@ import argparse
 import os
 import re
 import time
+import shutil
+import signal
 from pathlib import Path
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
@@ -283,6 +285,91 @@ def load_config() -> dict:
     except Exception as e:
         log_warn(f"Failed to parse config file: {e}")
         return {}
+
+
+def detect_clipboard_backend(selection: str = "clipboard") -> Optional[List[List[str]]]:
+    """
+    Detect available clipboard tool for the current platform/session.
+
+    Args:
+        selection: "clipboard", "primary", or "both"
+
+    Returns:
+        List of command lists to try (for "both" mode, returns two commands).
+        None if no clipboard tool found.
+    """
+    import platform
+    system = platform.system()
+
+    def make_commands(tool: str, sel: str) -> List[str]:
+        """Build command list for a tool and selection type."""
+        if tool == "wl-paste":
+            cmd = ["wl-paste", "--type", "text"]
+            if sel == "primary":
+                cmd.insert(1, "--primary")
+            return cmd
+        elif tool == "xclip":
+            return ["xclip", "-selection", sel, "-o"]
+        elif tool == "xsel":
+            flag = "--clipboard" if sel == "clipboard" else "--primary"
+            return ["xsel", flag, "--output"]
+        elif tool == "pbpaste":
+            return ["pbpaste"]
+        return []
+
+    def test_tool(cmd: List[str]) -> bool:
+        """Test if a clipboard command works."""
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=2)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+
+    def detect_for_selection(sel: str) -> Optional[List[str]]:
+        """Detect working clipboard command for a specific selection."""
+        if system == "Darwin":
+            cmd = make_commands("pbpaste", sel)
+            if shutil.which("pbpaste"):
+                return cmd
+            return None
+
+        # Linux/BSD: check session type
+        session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        wayland_display = os.environ.get("WAYLAND_DISPLAY")
+        display = os.environ.get("DISPLAY")
+
+        # Try Wayland first if session indicates it
+        if session_type == "wayland" or wayland_display:
+            if shutil.which("wl-paste"):
+                cmd = make_commands("wl-paste", sel)
+                if test_tool(cmd):
+                    log_debug(f"Using wl-paste for {sel}")
+                    return cmd
+
+        # Try X11 tools
+        if session_type == "x11" or display:
+            if shutil.which("xclip"):
+                cmd = make_commands("xclip", sel)
+                if test_tool(cmd):
+                    log_debug(f"Using xclip for {sel}")
+                    return cmd
+            if shutil.which("xsel"):
+                cmd = make_commands("xsel", sel)
+                if test_tool(cmd):
+                    log_debug(f"Using xsel for {sel}")
+                    return cmd
+
+        return None
+
+    if selection == "both":
+        clip_cmd = detect_for_selection("clipboard")
+        primary_cmd = detect_for_selection("primary")
+        if clip_cmd or primary_cmd:
+            return [cmd for cmd in [clip_cmd, primary_cmd] if cmd]
+        return None
+    else:
+        cmd = detect_for_selection(selection)
+        return [cmd] if cmd else None
 
 
 def run_git(
