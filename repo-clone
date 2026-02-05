@@ -25,10 +25,12 @@ import subprocess
 import argparse
 import os
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
+from enum import IntEnum
 
 
 # Exit codes
@@ -40,16 +42,50 @@ class ExitCode:
     SUBMODULE_FAILED = 4
     PERMISSION_ERROR = 5
     GIT_LFS_FAILED = 6
+    NO_CLIPBOARD_TOOL = 7
+
+
+class VerboseLevel(IntEnum):
+    """Verbosity levels for output control."""
+    SILENT = 0    # Success/failure messages only
+    COMMANDS = 1  # Git commands before execution
+    DETAILS = 2   # + Timing, repo size, submodule details
+    DEBUG = 3     # + Debug output, internal state, raw git output
 
 
 # Global verbosity
-VERBOSE = False
+VERBOSITY = 0  # VerboseLevel.SILENT
+
+# Built-in recognized repository hosts
+BUILTIN_HOSTS = [
+    "github.com",
+    "gitlab.com",
+    "codeberg.org",
+    "bitbucket.org",
+    "huggingface.co",
+    "sr.ht",
+    "git.sr.ht",
+]
 
 
 def log_info(msg: str) -> None:
-    """Log informational message to stderr."""
-    if VERBOSE:
+    """Log informational message (level 1+)."""
+    if VERBOSITY >= VerboseLevel.COMMANDS:
         print(f"INFO: {msg}", file=sys.stderr)
+
+
+def log_detail(msg: str) -> None:
+    """Log detailed message (level 2+)."""
+    if VERBOSITY >= VerboseLevel.DETAILS:
+        print(f"DETAIL: {msg}", file=sys.stderr)
+
+
+def log_debug(msg: str) -> None:
+    """Log debug message (level 3 only)."""
+    if VERBOSITY >= VerboseLevel.DEBUG:
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"DEBUG [{ts}]: {msg}", file=sys.stderr)
 
 
 def log_warn(msg: str) -> None:
@@ -87,7 +123,7 @@ class CloneOptions:
     shallow: bool = False         # Use --depth 1
     depth: int = 1                # Shallow clone depth
     base_dir: Optional[Path] = None  # Base directory (default: $HOME)
-    verbose: bool = False         # Show git commands
+    verbosity: int = 0            # Verbosity level (0=silent, 1=commands, 2=details, 3=debug)
     dry_run: bool = False         # Show what would be done
 
 
@@ -205,7 +241,7 @@ def normalize_clone_url(info: RepoInfo) -> str:
 def run_git(
     args: List[str],
     cwd: Optional[Path] = None,
-    verbose: bool = False,
+    verbosity: int = 0,
     dry_run: bool = False,
     check: bool = True
 ) -> subprocess.CompletedProcess:
@@ -215,7 +251,7 @@ def run_git(
     Args:
         args: Git command arguments (without 'git' prefix)
         cwd: Working directory for the command
-        verbose: If True, print the command before execution
+        verbosity: Verbosity level (0=silent, 1=commands, 2=details, 3=debug)
         dry_run: If True, only print what would be done
         check: If True, raise on non-zero exit code
 
@@ -224,19 +260,49 @@ def run_git(
     """
     cmd = ["git"] + args
 
-    if verbose or dry_run:
+    # Print command at level 1+
+    if verbosity >= VerboseLevel.COMMANDS or dry_run:
         cwd_str = f" (in {cwd})" if cwd else ""
         print(f"$ {' '.join(cmd)}{cwd_str}", file=sys.stderr)
 
     if dry_run:
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True
-    )
+    # Debug: log before execution
+    if verbosity >= VerboseLevel.DEBUG:
+        log_debug(f"Executing: {' '.join(cmd)}")
+
+    # Measure timing at level 2+
+    start_time = time.perf_counter()
+
+    # At level 3, stream output instead of capturing
+    if verbosity >= VerboseLevel.DEBUG:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdout=None,  # Stream to terminal
+            stderr=None   # Stream to terminal
+        )
+        # Create a CompletedProcess with empty captured output
+        result = subprocess.CompletedProcess(cmd, result.returncode, "", "")
+    else:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True
+        )
+
+    elapsed = time.perf_counter() - start_time
+
+    # Show timing at level 2+
+    if verbosity >= VerboseLevel.DETAILS:
+        print(f"  -> completed in {elapsed:.2f}s", file=sys.stderr)
+
+    # Debug: show output
+    if verbosity >= VerboseLevel.DEBUG and result.stdout:
+        log_debug(f"stdout: {result.stdout.strip()[:500]}")
 
     if check and result.returncode != 0:
         log_error(f"Git command failed: {' '.join(cmd)}")
@@ -284,7 +350,7 @@ def init_submodules(repo_path: Path, options: CloneOptions) -> int:
         run_git(
             ["submodule", "sync", "--recursive"],
             cwd=repo_path,
-            verbose=options.verbose,
+            verbosity=options.verbosity,
             dry_run=options.dry_run,
             check=False
         )
@@ -297,7 +363,7 @@ def init_submodules(repo_path: Path, options: CloneOptions) -> int:
         run_git(
             update_args,
             cwd=repo_path,
-            verbose=options.verbose,
+            verbosity=options.verbosity,
             dry_run=options.dry_run
         )
         log_info("Submodules initialized/updated successfully")
@@ -336,7 +402,7 @@ def update_repo(repo_path: Path, options: CloneOptions) -> int:
         run_git(
             fetch_args,
             cwd=repo_path,
-            verbose=options.verbose,
+            verbosity=options.verbosity,
             dry_run=options.dry_run
         )
         log_info("Fetch completed")
@@ -354,7 +420,7 @@ def update_repo(repo_path: Path, options: CloneOptions) -> int:
             run_git(
                 ["pull"],
                 cwd=repo_path,
-                verbose=options.verbose,
+                verbosity=options.verbosity,
                 dry_run=options.dry_run
             )
             log_info("Pull completed")
@@ -410,7 +476,7 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
             run_git(
                 ["lfs", "install"],
                 cwd=parent_dir,
-                verbose=options.verbose,
+                verbosity=options.verbosity,
                 dry_run=options.dry_run
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -444,7 +510,7 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
         run_git(
             clone_args,
             cwd=parent_dir,
-            verbose=options.verbose,
+            verbosity=options.verbosity,
             dry_run=options.dry_run
         )
         print(f"Successfully cloned to: {repo_path}")
@@ -499,8 +565,8 @@ Examples:
                         help="Custom depth for shallow clone (default: 1)")
     parser.add_argument("--base-dir", type=Path,
                         help="Override $HOME as base directory")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Show git commands being executed")
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+                        help="Increase verbosity (-v: commands, -vv: timing, -vvv: debug)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without executing")
 
@@ -512,18 +578,26 @@ Examples:
         if env_base:
             args.base_dir = Path(env_base)
 
-    if not args.verbose:
-        args.verbose = os.environ.get("REPO_CLONE_VERBOSE") == "1"
+    # Handle REPO_CLONE_VERBOSE env var (supports 0, 1, 2, 3, true, yes)
+    env_verbose = os.environ.get("REPO_CLONE_VERBOSE", "")
+    if env_verbose.isdigit():
+        env_level = min(int(env_verbose), 3)
+    elif env_verbose.lower() in ("true", "yes"):
+        env_level = 1
+    else:
+        env_level = 0
 
-    global VERBOSE
-    VERBOSE = args.verbose
+    verbosity = max(args.verbose, env_level)
+
+    global VERBOSITY
+    VERBOSITY = verbosity
 
     options = CloneOptions(
         recursive=not args.no_recursive,
         shallow=args.shallow,
         depth=args.depth,
         base_dir=args.base_dir,
-        verbose=args.verbose,
+        verbosity=verbosity,
         dry_run=args.dry_run
     )
 
