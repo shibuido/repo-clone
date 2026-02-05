@@ -372,6 +372,73 @@ def detect_clipboard_backend(selection: str = "clipboard") -> Optional[List[List
         return [cmd] if cmd else None
 
 
+def read_clipboard(commands: List[List[str]]) -> Optional[str]:
+    """
+    Read text from clipboard using detected backend.
+
+    Args:
+        commands: List of command lists to try (from detect_clipboard_backend)
+
+    Returns:
+        Clipboard text or None on error/empty.
+    """
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            log_debug(f"Clipboard read failed with {cmd[0]}: {e}")
+            continue
+    return None
+
+
+def extract_repo_url(text: str, extra_hosts: List[str] = None) -> Optional[str]:
+    """
+    Extract a repository URL from clipboard text if it matches known hosts.
+
+    Args:
+        text: Raw clipboard text
+        extra_hosts: Additional hosts to recognize beyond BUILTIN_HOSTS
+
+    Returns:
+        Cleaned URL string or None if not a recognized repo URL.
+    """
+    if not text:
+        return None
+
+    # Get first line, strip whitespace
+    line = text.strip().split('\n')[0].strip()
+    if not line:
+        return None
+
+    # Strip query params and anchors for matching
+    clean_url = line.split('?')[0].split('#')[0]
+
+    # Build host list
+    all_hosts = BUILTIN_HOSTS + (extra_hosts or [])
+
+    # Check SSH format: git@host:user/repo
+    ssh_match = re.match(r'^(?:ssh://)?git@([^:/]+)[:/]', clean_url)
+    if ssh_match:
+        host = ssh_match.group(1)
+        if host in all_hosts:
+            log_debug(f"Matched SSH URL for host: {host}")
+            return clean_url
+
+    # Check HTTPS format
+    if clean_url.startswith(('http://', 'https://')):
+        try:
+            parsed = urlparse(clean_url)
+            if parsed.netloc in all_hosts:
+                log_debug(f"Matched HTTPS URL for host: {parsed.netloc}")
+                return clean_url
+        except Exception:
+            pass
+
+    return None
+
+
 def run_git(
     args: List[str],
     cwd: Optional[Path] = None,
