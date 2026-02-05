@@ -2,7 +2,9 @@
 """
 Repo Clone Tool - Clone and organize git repositories with submodule support.
 
-Usage: repo-clone [OPTIONS] <url>
+Usage:
+    repo-clone [OPTIONS] <url>        Clone/update a single repository
+    repo-clone --watch [OPTIONS]      Monitor clipboard for repo URLs
 
 This script clones repositories organized under:
     $HOME/<hosting_shortcode>/<username>/<repo>
@@ -12,12 +14,16 @@ Examples:
     repo-clone https://github.com/user/repo
     repo-clone https://huggingface.co/TheBloke/model
     repo-clone --shallow https://github.com/user/large-repo
+    repo-clone --watch                    # Monitor clipboard
+    repo-clone --watch --shallow          # Monitor with shallow clones
+    repo-clone --watch --selection both   # Monitor both clipboards (Linux)
 
 Features:
     - Automatic submodule initialization (--recursive by default)
     - Updates existing repos with fetch/pull and submodule sync
     - Fixes repos that were cloned without submodules
     - Special handling for Hugging Face (git lfs)
+    - Clipboard watch mode for continuous cloning
 """
 
 import sys
@@ -861,6 +867,15 @@ Examples:
   %(prog)s --shallow https://github.com/user/large-repo
   %(prog)s --no-recursive https://github.com/user/repo
   %(prog)s --dry-run -v https://github.com/user/repo
+
+Watch mode:
+  %(prog)s --watch                    Monitor clipboard continuously
+  %(prog)s --watch --shallow          Shallow clone detected repos
+  %(prog)s --watch -i 0.25            Faster polling (250ms)
+  %(prog)s --watch --selection both   Monitor both clipboards (Linux)
+  %(prog)s --watch --dry-run -v       Test URL detection
+
+Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
         """
     )
 
