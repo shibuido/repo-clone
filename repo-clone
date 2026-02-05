@@ -127,6 +127,24 @@ class CloneOptions:
     dry_run: bool = False         # Show what would be done
 
 
+@dataclass
+class WatchConfig:
+    """Configuration for clipboard watch mode."""
+    interval: float = 0.5                    # Polling interval in seconds
+    selection: str = "clipboard"             # clipboard | primary | both
+    clipboard_command: Optional[str] = None  # Override auto-detected command
+    extra_hosts: List[str] = field(default_factory=list)  # Additional hosts to recognize
+
+
+@dataclass
+class WatchStats:
+    """Runtime statistics for watch mode."""
+    cloned: int = 0
+    skipped: int = 0
+    failed: int = 0
+    seen_urls: set = field(default_factory=set)
+
+
 def extract_hosting_shortcode(hosting: str) -> str:
     """
     Extract shortcode from hosting domain.
