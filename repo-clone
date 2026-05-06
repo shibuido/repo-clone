@@ -468,6 +468,98 @@ def create_github_fork(
     return ExitCode.SUCCESS
 
 
+# ---- Fork-side clone & upstream wiring ----
+
+def clone_fork_with_retry(
+    fork_url: str,
+    target_org: str,
+    fork_name: str,
+    options: CloneOptions,
+    max_wait_s: float = 10.0,
+) -> int:
+    """
+    Clone (or update) the fork side at $base/$host/$forkOrg/$forkName.
+
+    Reuses the existing parse_git_url + clone_repo path. If the fork was just
+    created and GitHub hasn't propagated it yet (HTTP 404), retry with
+    exponential backoff up to max_wait_s.
+    """
+    info = parse_git_url(fork_url)
+    waited = 0.0
+    delay = 1.0
+    while True:
+        rc = clone_repo(info, options)
+        if rc == ExitCode.SUCCESS:
+            return rc
+        if waited >= max_wait_s:
+            return rc
+        # Only retry on a likely "fork not propagated yet" 404
+        emit(
+            "fork-clone-retrying",
+            level="warn",
+            target_org=target_org,
+            fork_name=fork_name,
+            waited_s=round(waited, 2),
+        )
+        time.sleep(delay)
+        waited += delay
+        delay = min(delay * 1.5, 4.0)
+
+
+def wire_upstream_remote(
+    fork_path: Path,
+    upstream_url: str,
+    remote_name: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    Idempotently ensure `<remote_name>` on the fork-side clone points at
+    upstream_url.
+
+    * Absent → add it (emit upstream-added).
+    * Present and matches → skip (emit upstream-already-correct).
+    * Present and differs → WARN, do not overwrite (emit upstream-mismatch).
+    """
+    try:
+        result = run_git(
+            ["remote", "get-url", remote_name],
+            cwd=fork_path,
+            verbosity=0,
+            dry_run=False,  # always actually probe, even on dry-run
+            check=False,
+        )
+        existing = result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        existing = None
+
+    if existing is None:
+        if dry_run:
+            emit("upstream-added", level="info", fork_path=str(fork_path),
+                 remote_name=remote_name, upstream_url=upstream_url, dry_run=True)
+            return
+        run_git(
+            ["remote", "add", remote_name, upstream_url],
+            cwd=fork_path, verbosity=0, dry_run=False,
+        )
+        emit("upstream-added", level="info", fork_path=str(fork_path),
+             remote_name=remote_name, upstream_url=upstream_url)
+        return
+
+    if existing == upstream_url:
+        emit("upstream-already-correct", level="info",
+             fork_path=str(fork_path), remote_name=remote_name)
+        return
+
+    emit(
+        "upstream-mismatch",
+        level="warn",
+        fork_path=str(fork_path),
+        remote_name=remote_name,
+        current_url=existing,
+        expected_url=upstream_url,
+    )
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
