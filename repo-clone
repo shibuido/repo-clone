@@ -298,6 +298,19 @@ class WatchStats:
     seen_urls: set = field(default_factory=set)
 
 
+@dataclass
+class ForkOptions:
+    """
+    Options controlling --fork behavior. Resolved from CLI + env + config + defaults.
+    """
+    enabled: bool = False
+    target_org: Optional[str] = None
+    name_template: str = "{repo}"
+    name_literal: Optional[str] = None
+    all_branches: bool = False
+    upstream_remote_name: str = "upstream"
+
+
 def extract_hosting_shortcode(hosting: str) -> str:
     """
     Extract shortcode from hosting domain.
