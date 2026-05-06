@@ -257,6 +257,91 @@ def gh_authed_user() -> Optional[str]:
     return None
 
 
+# ---- Fork identity resolution ----
+
+@dataclass
+class ForkIdentity:
+    """Resolved (target_org, fork_name, fork_clone_url) for a --fork invocation."""
+    target_org: str
+    fork_name: str
+    fork_clone_url: str           # HTTPS clone URL for the fork (post-creation)
+    template_used: str            # The template that produced fork_name (for telemetry)
+
+
+def split_fork_name_shorthand(value: str) -> Tuple[Optional[str], str]:
+    """
+    Parse --fork-name VALUE.
+
+    If VALUE contains exactly one '/', split into (org, name).
+    Else return (None, VALUE).
+
+    Raises ValueError on multiple '/' or empty either side.
+    """
+    if value.count("/") == 0:
+        return (None, value)
+    if value.count("/") == 1:
+        org, name = value.split("/", 1)
+        if not org or not name:
+            raise ValueError(
+                f"--fork-name: org or name is empty in {value!r} "
+                f"(use 'org/name' or just 'name')"
+            )
+        return (org, name)
+    raise ValueError(
+        f"--fork-name: {value!r} has more than one '/'; "
+        f"use 'org/name' (one slash) or just 'name'"
+    )
+
+
+def resolve_fork_identity(
+    info: RepoInfo,
+    opts: ForkOptions,
+    gh_user: Optional[str],
+) -> ForkIdentity:
+    """
+    Compute (target_org, fork_name, fork_clone_url) from URL, options, and the
+    authed gh user (used as default org if opts.target_org is None).
+
+    Raises ValueError if neither target_org nor gh_user is available.
+    """
+    # Target org
+    target_org = opts.target_org or gh_user
+    if not target_org:
+        raise ValueError(
+            "fork target org could not be resolved: "
+            "set fork.target_org in config, pass --fork-org, "
+            "or ensure `gh auth status` shows a logged-in user"
+        )
+
+    # Fork name
+    if opts.name_literal is not None:
+        fork_name = opts.name_literal
+        template_used = "(literal)"
+    else:
+        try:
+            fork_name = opts.name_template.format(
+                repo=info.repo,
+                org=info.username,
+                host=info.shortcode,
+            )
+            template_used = opts.name_template
+        except (KeyError, IndexError) as e:
+            raise ValueError(
+                f"fork.name_template uses unknown variable: {e}; "
+                f"available: {{repo}}, {{org}}, {{host}}"
+            )
+
+    # Fork clone URL (always HTTPS for the v1 GitHub-only path)
+    fork_clone_url = f"https://github.com/{target_org}/{fork_name}.git"
+
+    return ForkIdentity(
+        target_org=target_org,
+        fork_name=fork_name,
+        fork_clone_url=fork_clone_url,
+        template_used=template_used,
+    )
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
