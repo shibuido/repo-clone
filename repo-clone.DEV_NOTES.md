@@ -146,6 +146,30 @@ repo-clone --base-dir tmp https://github.com/user/repo-with-submodules
 # Verify submodules are now populated
 ```
 
+### --fork end-to-end (dry-run)
+
+````bash
+# Basic: source + fork, dry-run
+repo-clone --base-dir /tmp/test --fork --dry-run -v https://github.com/shibuido/repo-clone
+
+# JSONL output
+repo-clone --base-dir /tmp/test --fork --jsonl --dry-run https://github.com/shibuido/repo-clone | jq -c .
+
+# Non-GitHub host → exit 9
+repo-clone --fork --dry-run https://gitlab.com/inkscape/inkscape
+
+# Shorthand --fork-name
+repo-clone --fork --fork-name greg/widget-test --dry-run -v https://github.com/acme/widget
+
+# Conflicting flags
+repo-clone --fork-all --fork-default https://github.com/foo/bar      # exit 2
+repo-clone --fork --fork-org X --fork-name Y/Z https://github.com/foo/bar  # exit 2
+
+# Agent help
+repo-clone --help-for-agents | head -40
+repo-clone help-for-agents | head -40
+````
+
 ## Files
 
 | File | Purpose |
