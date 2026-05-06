@@ -51,6 +51,8 @@ class ExitCode:
     PERMISSION_ERROR = 5
     GIT_LFS_FAILED = 6
     NO_CLIPBOARD_TOOL = 7
+    # Codes 8-11 reserved for fork-related errors (added by upcoming Task 18)
+    CONFIG_ERROR = 12
 
 
 class VerboseLevel(IntEnum):
@@ -372,6 +374,11 @@ def parse_yaml_subset(text: str) -> dict:
 
     # Cleanup: keys that were tentatively dicts but received list items
     # are already handled. Empty tentative dicts that received nothing stay as {}.
+    #
+    # Note: a key with no value or no nested children is returned as `{}`
+    # (not `None` as standard YAML would). This is intentional — our usage
+    # pattern is `config.get("section", {}).get("key")`, which works
+    # uniformly whether the section is empty `{}` or fully populated.
     return result
 
 
@@ -419,7 +426,7 @@ def load_config(config_path: Optional[Path] = None) -> dict:
             return config
         except Exception as e:
             log_error(f"Failed to parse config {config_path}: {e}")
-            sys.exit(ExitCode.INVALID_URL)  # generic config-error exit
+            sys.exit(ExitCode.CONFIG_ERROR)
     except ImportError:
         pass
 
@@ -433,7 +440,7 @@ def load_config(config_path: Optional[Path] = None) -> dict:
             f"Failed to parse config {config_path}: {e}\n"
             f"  Hint: install pyyaml for richer YAML support, or simplify your config."
         )
-        sys.exit(ExitCode.INVALID_URL)
+        sys.exit(ExitCode.CONFIG_ERROR)
 
 
 def detect_clipboard_backend(selection: str = "clipboard") -> Optional[List[List[str]]]:
