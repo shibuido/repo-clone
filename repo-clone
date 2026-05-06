@@ -491,9 +491,13 @@ def clone_fork_with_retry(
         rc = clone_repo(info, options)
         if rc == ExitCode.SUCCESS:
             return rc
+        # Only retry on CLONE_FAILED (likely a "fork not propagated yet" 404).
+        # Other failure codes (PERMISSION_ERROR, etc.) are terminal — surface them
+        # immediately rather than spin with a misleading retry log.
+        if rc != ExitCode.CLONE_FAILED:
+            return rc
         if waited >= max_wait_s:
             return rc
-        # Only retry on a likely "fork not propagated yet" 404
         emit(
             "fork-clone-retrying",
             level="warn",
@@ -599,7 +603,7 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
         ident = resolve_fork_identity(info, fork_opts, gh_user)
     except ValueError as e:
         emit("fork-identity-failed", level="error", error=str(e))
-        return ExitCode.GH_MISSING
+        return ExitCode.CONFIG_ERROR
 
     emit(
         "fork-identity-resolved",
