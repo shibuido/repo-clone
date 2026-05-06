@@ -1434,7 +1434,7 @@ def update_repo(repo_path: Path, options: CloneOptions) -> int:
     """
     exit_code = ExitCode.SUCCESS
 
-    print(f"Updating existing repository: {repo_path}")
+    print(f"Updating existing repository: {repo_path}", file=sys.stderr)
 
     # Fetch (with submodules if recursive)
     fetch_args = ["fetch"]
@@ -1549,14 +1549,14 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
 
     # Execute clone
     try:
-        print(f"Cloning {clone_url} to {repo_path}")
+        print(f"Cloning {clone_url} to {repo_path}", file=sys.stderr)
         run_git(
             clone_args,
             cwd=parent_dir,
             verbosity=options.verbosity,
             dry_run=options.dry_run
         )
-        print(f"Successfully cloned to: {repo_path}")
+        print(f"Successfully cloned to: {repo_path}", file=sys.stderr)
         return ExitCode.SUCCESS
     except subprocess.CalledProcessError:
         return ExitCode.CLONE_FAILED
