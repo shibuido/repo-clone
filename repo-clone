@@ -344,6 +344,46 @@ def resolve_fork_identity(
     )
 
 
+# ---- Fork creation (idempotent) ----
+
+def fork_exists_on_github(target_org: str, fork_name: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check whether a repo exists at github.com/{target_org}/{fork_name} and,
+    if so, return its parent.full_name (the source repo it forks from).
+
+    Returns:
+        (exists: bool, parent_full_name: Optional[str])
+        parent_full_name is None if the repo exists but is not a fork.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api",
+             f"repos/{target_org}/{fork_name}",
+             "--jq", ".parent.full_name // \"\""],
+            capture_output=True, text=True, timeout=15
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-existence-check-failed", level="warn", error=str(e))
+        return (False, None)
+
+    if result.returncode == 0:
+        parent = result.stdout.strip() or None
+        return (True, parent)
+
+    # gh prints "HTTP 404" on stderr for missing repos; treat any non-zero as
+    # "not found" only when stderr indicates 404. Otherwise treat as error.
+    err = (result.stderr or "")
+    if "HTTP 404" in err or "Not Found" in err:
+        return (False, None)
+    emit(
+        "fork-existence-check-failed",
+        level="warn",
+        gh_exit=result.returncode,
+        stderr=err.strip()[:200],
+    )
+    return (False, None)
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
