@@ -33,7 +33,9 @@ Field rules:
 
 | event | level | typical fields |
 |---|---|---|
+| `invalid-url` | error | `url`, `error` |
 | `parsed-url` | info | `url`, `host`, `org`, `repo`, `is_ssh` |
+| `host-not-supported-for-fork` | error | `host`, `hint` |
 | `clone-start` | info | `url`, `path`, `recursive`, `shallow` |
 | `clone-success` | info | `url`, `path` |
 | `clone-failed` | error | `url`, `path`, `git_exit_code` |
@@ -45,12 +47,15 @@ Field rules:
 | `gh-preflight-ok` | info | `gh_version` |
 | `gh-missing` | error | `hint` |
 | `gh-unauthed` | error | `hint` |
+| `fork-identity-failed` | error | `error` |
 | `fork-identity-resolved` | info | `source_org`, `source_repo`, `target_org`, `fork_name`, `template` |
 | `fork-exists` | info | `target_org`, `fork_name`, `parent_full_name` |
+| `fork-existence-check-failed` | warn | `error` or `gh_exit`, `stderr` |
 | `fork-collision` | error | `target_org`, `fork_name`, `parent_full_name`, `expected_parent` |
 | `fork-creating` | info | `source`, `target_org`, `fork_name`, `all_branches` |
 | `fork-created` | info | `source`, `target_org`, `fork_name`, `clone_url` |
 | `fork-creation-failed` | error | `source`, `target_org`, `fork_name`, `gh_exit_code`, `stderr` |
+| `fork-clone-retrying` | warn | `target_org`, `fork_name`, `waited_s` |
 | `upstream-added` | info | `fork_path`, `remote_name`, `upstream_url` |
 | `upstream-already-correct` | info | `fork_path`, `remote_name` |
 | `upstream-mismatch` | warn | `fork_path`, `remote_name`, `current_url`, `expected_url` |

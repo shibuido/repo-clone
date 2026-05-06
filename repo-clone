@@ -1625,6 +1625,7 @@ CANONICAL EXAMPLES
 |  10  | gh repo fork failed                                    |
 |  11  | fork-name collision: target_org/name exists, not a     |
 |      | fork of source                                         |
+|  12  | config file parse error                                |
 """,
     "STATE_MACHINE": """\
 URL → parse → host_gate(github.com if --fork) → gh_preflight(if --fork) →
