@@ -114,6 +114,84 @@ def error_exit(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
+# ---- Output / structured logging ----
+# Two output modes: "human" (existing INFO:/WARN:/ERROR: prefixes on stderr)
+# and "jsonl" (one JSON object per line on stdout). See
+# docs/design/repo-clone-DESIGN-output-prefixes.md and
+# docs/design/repo-clone-DESIGN-jsonl-output.md.
+
+import json as _json
+from datetime import datetime, timezone
+
+# Module-level state. set_output_mode() and set_output_stream() configure.
+_OUTPUT_MODE = "human"
+_OUTPUT_STREAM = None  # None → stdout for jsonl, stderr for human
+_SHOW_INFO = False     # Promotes INFO to v0 visibility when True
+
+
+def set_output_mode(mode: str) -> None:
+    """Set output mode: 'human' or 'jsonl'."""
+    global _OUTPUT_MODE
+    if mode not in ("human", "jsonl"):
+        raise ValueError(f"output mode must be human or jsonl, got {mode!r}")
+    _OUTPUT_MODE = mode
+
+
+def set_output_stream(stream) -> None:
+    """Override the destination stream (used by tests). None → default."""
+    global _OUTPUT_STREAM
+    _OUTPUT_STREAM = stream
+
+
+def set_show_info(value: bool) -> None:
+    """Promote INFO: lines to verbosity-0 visibility."""
+    global _SHOW_INFO
+    _SHOW_INFO = bool(value)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def emit(event: str, *, level: str = "info", **fields) -> None:
+    """
+    Emit a structured event.
+
+    In human mode: emits a prefixed line on stderr (INFO:/WARN:/ERROR:),
+    suppressing INFO unless verbosity >= 1 or show_info is True.
+
+    In jsonl mode: emits one compact JSON object on stdout (or override stream).
+    """
+    if _OUTPUT_MODE == "jsonl":
+        record = {"event": event, "level": level, "ts": _now_iso(), **fields}
+        line = _json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+        out = _OUTPUT_STREAM if _OUTPUT_STREAM is not None else sys.stdout
+        print(line, file=out, flush=True)
+        return
+
+    # Human mode: synthesize a readable message from fields
+    if level == "info":
+        if VERBOSITY < VerboseLevel.COMMANDS and not _SHOW_INFO:
+            return
+        prefix = "INFO:"
+    elif level == "warn":
+        prefix = "WARN:"
+    elif level == "error":
+        prefix = "ERROR:"
+    elif level == "debug":
+        if VERBOSITY < VerboseLevel.DEBUG:
+            return
+        prefix = "DEBUG:"
+    else:
+        prefix = level.upper() + ":"
+
+    # Best-effort one-line render for human mode.
+    detail = ", ".join(f"{k}={v}" for k, v in fields.items())
+    msg = f"{event}" + (f" — {detail}" if detail else "")
+    out = _OUTPUT_STREAM if _OUTPUT_STREAM is not None else sys.stderr
+    print(f"{prefix} {msg}", file=out, flush=True)
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
