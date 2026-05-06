@@ -192,6 +192,68 @@ def emit(event: str, *, level: str = "info", **fields) -> None:
     print(f"{prefix} {msg}", file=out, flush=True)
 
 
+# ---- gh preflight ----
+# Verify the GitHub CLI is installed and authenticated. Used by --fork.
+
+def gh_preflight() -> bool:
+    """
+    Verify gh is installed and authenticated.
+
+    Emits an error event and returns False on failure; returns True on success.
+    """
+    if shutil.which("gh") is None:
+        emit(
+            "gh-missing",
+            level="error",
+            hint="install GitHub CLI: https://cli.github.com/  (then run `gh auth login`)",
+        )
+        return False
+    try:
+        ver = subprocess.run(
+            ["gh", "--version"], capture_output=True, text=True, timeout=10
+        )
+        if ver.returncode != 0:
+            emit("gh-missing", level="error", hint="gh --version exited nonzero")
+            return False
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("gh-missing", level="error", hint=f"gh --version: {e}")
+        return False
+
+    try:
+        auth = subprocess.run(
+            ["gh", "auth", "status"], capture_output=True, text=True, timeout=10
+        )
+        if auth.returncode != 0:
+            emit(
+                "gh-unauthed",
+                level="error",
+                hint="run `gh auth login` to authenticate the GitHub CLI",
+            )
+            return False
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("gh-unauthed", level="error", hint=f"gh auth status: {e}")
+        return False
+
+    # Best-effort version line for telemetry
+    first_line = ver.stdout.strip().splitlines()[0] if ver.stdout else ""
+    emit("gh-preflight-ok", level="info", gh_version=first_line)
+    return True
+
+
+def gh_authed_user() -> Optional[str]:
+    """Return the authenticated GitHub username, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
