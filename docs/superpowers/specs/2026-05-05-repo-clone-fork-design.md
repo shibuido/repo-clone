@@ -128,8 +128,7 @@ useful; no rollback).
 
 ## 5. Config file
 
-**Location:** `~/.config/shibuido/repo-clone/config.yaml` (respects
-`$XDG_CONFIG_HOME`).
+**Location:** `~/.config/shibuido/repo-clone/repo-clone-config.yaml` (respects `$XDG_CONFIG_HOME`).
 
 **Loaded if present, ignored if absent.** A tiny stdlib YAML-subset reader
 handles top-level keys, one level of nested mappings, strings, booleans, and
@@ -146,7 +145,7 @@ non-goal but the layout is designed so it slots in additively):
     └── default.yaml             # future: equivalent alias for config.yaml
 ```
 
-v1 loader: try `config.yaml`, else try `profiles/default.yaml`, else use
+v1 loader: try `repo-clone-config.yaml`, else try `profiles/default.yaml`, else use
 built-in defaults. If both exist with different contents, WARNING.
 
 **Schema:**
@@ -181,10 +180,10 @@ alternative file for the rare power-user case.
 **Human mode:**
 
 ```
-INFO:    routine progress; suppressed unless --verbose or output.show_info
-WARNING: degraded but proceeding (e.g., fork already exists, upstream remote
-         points elsewhere and we left it alone)
-ERROR:   abort condition; followed by exit
+INFO:  routine progress; suppressed unless --verbose or output.show_info
+WARN:  degraded but proceeding (e.g., fork already exists, upstream remote
+       points elsewhere and we left it alone)
+ERROR: abort condition; followed by exit
 ```
 
 `--verbose` keeps its existing role (shows git commands) and additionally
@@ -192,7 +191,7 @@ unmasks `INFO:` lines.
 
 **JSONL mode (`--jsonl`):** one compact JSON object per stdout line.
 Mutually exclusive with the human prefixes (no `INFO:` strings; instead each
-event gets `"level": "info"|"warning"|"error"` and a stable `"event"` name).
+event gets `"level": "info"|"warn"|"error"` and a stable `"event"` name).
 Schema lives in `docs/design/repo-clone-DESIGN-jsonl-output.md`. Sketch:
 
 ```json
@@ -240,20 +239,17 @@ Cross-link to `--help` for the human-oriented overview.
 
 | Situation | Behavior | Exit |
 |---|---|---|
-| `gh` missing or unauthed | ERROR with actionable hint | 7 (new) |
-| Non-GitHub URL with `--fork` | ERROR pointing at FUTURE_WORK | 8 (new) |
+| `gh` missing or unauthed | ERROR with actionable hint | 8 (new) |
+| Non-GitHub URL with `--fork` | ERROR pointing at FUTURE_WORK | 9 (new) |
 | Source clone fails | ERROR; abort before touching GitHub | 2 |
 | Fork already exists on GH and `parent.full_name` matches source | INFO; continue to clone/update fork side | 0 |
-| Fork already exists on GH but `parent` mismatches source | ERROR (name collision with unrelated repo) | 10 (new) |
+| Fork already exists on GH but `parent` mismatches source | ERROR (name collision with unrelated repo) | 11 (new) |
 | Local fork dir exists, `origin` matches expected fork URL | Update (existing behavior) | 0 |
 | Local fork dir exists, `origin` differs or not a git repo | ERROR with specific path | 5 |
-| Fork creation API call fails | ERROR; source clone is left as-is (no rollback) | 9 (new) |
+| Fork creation API call fails | ERROR; source clone is left as-is (no rollback) | 10 (new) |
 | Existing exit codes 1–6 unchanged | — | 1–6 |
 
-**Newly minted codes:** 7 (`gh` missing/unauth), 8 (host not yet supported
-for fork), 9 (fork creation API failure), 10 (fork name collision with
-unrelated repo). Existing codes 1–6 retain their current meanings; we do
-not re-purpose them for new error classes.
+**Newly minted codes:** 8 (`gh` missing/unauth), 9 (host not yet supported for fork), 10 (fork creation API failure), 11 (fork name collision with unrelated repo). Existing codes 1–7 retain their current meanings (7 = NO_CLIPBOARD_TOOL); we do not re-purpose them for new error classes.
 
 ## 9. Documentation & maintainer scaffold
 
