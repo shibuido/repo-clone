@@ -51,7 +51,10 @@ class ExitCode:
     PERMISSION_ERROR = 5
     GIT_LFS_FAILED = 6
     NO_CLIPBOARD_TOOL = 7
-    # Codes 8-11 reserved for fork-related errors (added by upcoming Task 18)
+    GH_MISSING = 8                 # gh CLI missing or unauthed
+    HOST_NOT_SUPPORTED_FORK = 9    # --fork on non-GitHub URL
+    FORK_CREATION_FAILED = 10      # gh repo fork failed
+    FORK_NAME_COLLISION = 11       # target name exists, parent differs
     CONFIG_ERROR = 12
 
 
