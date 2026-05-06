@@ -384,6 +384,90 @@ def fork_exists_on_github(target_org: str, fork_name: str) -> Tuple[bool, Option
     return (False, None)
 
 
+def create_github_fork(
+    info: RepoInfo,
+    target_org: str,
+    fork_name: str,
+    all_branches: bool,
+    is_self_org: bool,
+    dry_run: bool = False,
+) -> int:
+    """
+    Create a fork via `gh repo fork`. Returns ExitCode.SUCCESS or
+    ExitCode.FORK_CREATION_FAILED.
+
+    is_self_org: True if target_org equals the authed gh user. In that case
+    `gh repo fork` does not need --org. When forking to a different org, we
+    pass --org.
+    """
+    source = f"{info.username}/{info.repo}"
+    cmd = ["gh", "repo", "fork", source, "--clone=false"]
+
+    if not is_self_org:
+        cmd.extend(["--org", target_org])
+
+    # Only pass --fork-name if it differs from source repo name (gh quirk:
+    # passing --fork-name with the same name still works but is noisy)
+    if fork_name != info.repo:
+        cmd.extend(["--fork-name", fork_name])
+
+    if not all_branches:
+        cmd.append("--default-branch-only")
+
+    if dry_run:
+        emit(
+            "fork-creating",
+            level="info",
+            source=source,
+            target_org=target_org,
+            fork_name=fork_name,
+            all_branches=all_branches,
+            dry_run=True,
+            cmd=" ".join(cmd),
+        )
+        return ExitCode.SUCCESS
+
+    emit(
+        "fork-creating",
+        level="info",
+        source=source,
+        target_org=target_org,
+        fork_name=fork_name,
+        all_branches=all_branches,
+    )
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-creation-failed", level="error",
+             source=source, target_org=target_org, fork_name=fork_name,
+             error=str(e))
+        return ExitCode.FORK_CREATION_FAILED
+
+    if result.returncode != 0:
+        emit(
+            "fork-creation-failed",
+            level="error",
+            source=source,
+            target_org=target_org,
+            fork_name=fork_name,
+            gh_exit_code=result.returncode,
+            stderr=(result.stderr or "").strip()[:500],
+        )
+        return ExitCode.FORK_CREATION_FAILED
+
+    clone_url = f"https://github.com/{target_org}/{fork_name}.git"
+    emit(
+        "fork-created",
+        level="info",
+        source=source,
+        target_org=target_org,
+        fork_name=fork_name,
+        clone_url=clone_url,
+    )
+    return ExitCode.SUCCESS
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
