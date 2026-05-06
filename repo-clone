@@ -1700,28 +1700,33 @@ def render_agent_help() -> str:
 
 def main() -> None:
     """CLI entry point."""
+    # Subcommand alias: `repo-clone help-for-agents` → render and exit.
+    if len(sys.argv) >= 2 and sys.argv[1] == "help-for-agents":
+        print(render_agent_help())
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(
         description="Clone or update git repositories with full submodule support.\n\n"
                     "Organizes repos under: $HOME/{hosting}/{user}/{repo}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog="""\
+🤖 AI agents: run `repo-clone --help-for-agents` (or `repo-clone help-for-agents`)
+   for an agent-optimized briefing — denser format, troubleshooting paths,
+   exit-code semantics, JSONL contract.
+   Issues / unclear behavior → https://github.com/shibuido/repo-clone/issues
+
 Examples:
   %(prog)s git@github.com:user/repo.git
   %(prog)s https://github.com/user/repo
-  %(prog)s https://huggingface.co/TheBloke/model
   %(prog)s --shallow https://github.com/user/large-repo
-  %(prog)s --no-recursive https://github.com/user/repo
-  %(prog)s --dry-run -v https://github.com/user/repo
-
-Watch mode:
+  %(prog)s --fork https://github.com/acme/widget
+  %(prog)s --fork --fork-name greg/widget-mod https://github.com/acme/widget
+  %(prog)s --fork --jsonl https://github.com/acme/widget | jq -c
   %(prog)s --watch                    Monitor clipboard continuously
-  %(prog)s --watch --shallow          Shallow clone detected repos
-  %(prog)s --watch -i 0.25            Faster polling (250ms)
   %(prog)s --watch --selection both   Monitor both clipboards (Linux)
-  %(prog)s --watch --dry-run -v       Test URL detection
 
 Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
-        """
+"""
     )
 
     parser.add_argument("url", nargs="?", default=None,
@@ -1745,8 +1750,43 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
                         help="Increase verbosity (-v: commands, -vv: timing, -vvv: debug)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without executing")
+    parser.add_argument("-F", "--fork", action="store_true",
+                        help="Create a fork on the host, then clone source AND fork")
+    parser.add_argument("--fork-all", action="store_true",
+                        help="Fork copies all branches (implies --fork)")
+    parser.add_argument("--fork-default", action="store_true",
+                        help="Fork copies only default branch (implies --fork)")
+    parser.add_argument("--fork-org", default=None,
+                        help="Override target org for the fork (implies --fork)")
+    parser.add_argument("--fork-name", default=None,
+                        help="Override fork repo name; 'org/name' shorthand "
+                             "splits into --fork-org/--fork-name (implies --fork)")
+    parser.add_argument("--jsonl", action="store_true",
+                        help="Emit one compact JSON object per line on stdout")
+    parser.add_argument("--help-for-agents", action="store_true",
+                        help="Print agent-optimized help and exit "
+                             "(also: `repo-clone help-for-agents`)")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Use an alternative config file path")
 
     args = parser.parse_args()
+
+    # Post-parse: --help-for-agents flag
+    if args.help_for_agents:
+        print(render_agent_help())
+        sys.exit(0)
+
+    # Validate flag mutex: --fork-all xor --fork-default
+    if args.fork_all and args.fork_default:
+        parser.error("--fork-all and --fork-default are mutually exclusive")
+
+    # Any --fork-* flag implies --fork
+    fork_implied = (args.fork or args.fork_all or args.fork_default
+                    or args.fork_org or args.fork_name)
+    args.fork = bool(fork_implied)
+
+    if args.watch and args.fork:
+        parser.error("--fork cannot be combined with --watch")
 
     # Validate: either --watch or url required, not both
     if args.watch and args.url:
@@ -1774,6 +1814,9 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
     global VERBOSITY
     VERBOSITY = verbosity
 
+    if args.jsonl:
+        set_output_mode("jsonl")
+
     options = CloneOptions(
         recursive=not args.no_recursive,
         shallow=args.shallow,
@@ -1783,27 +1826,74 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
         dry_run=args.dry_run
     )
 
+    # Always load config so non-watch paths see fork:/output: sections.
+    config = load_config(args.config)
+
+    # Apply output.show_info from config (CLI --jsonl already handled above)
+    if config.get("output", {}).get("show_info"):
+        set_show_info(True)
+
+    # Existing base_dir from config (was watch-only; promote to global)
+    if options.base_dir is None and "base_dir" in config:
+        bd = config["base_dir"]
+        if bd.startswith("~"):
+            bd = os.path.expanduser(bd)
+        options.base_dir = Path(bd)
+
+    # Resolve --fork-name shorthand (org/name)
+    fork_name_org_override: Optional[str] = None
+    fork_name_literal: Optional[str] = None
+    if args.fork_name is not None:
+        try:
+            fork_name_org_override, fork_name_literal = split_fork_name_shorthand(args.fork_name)
+        except ValueError as e:
+            parser.error(str(e))
+
+    # Reconcile --fork-org with shorthand-derived org
+    if fork_name_org_override is not None:
+        if args.fork_org is not None and args.fork_org != fork_name_org_override:
+            parser.error(
+                f"--fork-org ({args.fork_org}) conflicts with org from "
+                f"--fork-name ({fork_name_org_override})"
+            )
+        args.fork_org = fork_name_org_override
+
+    # Build ForkOptions: CLI > env > config > default
+    cfg_fork = config.get("fork", {}) if isinstance(config.get("fork"), dict) else {}
+    target_org = (
+        args.fork_org
+        or os.environ.get("REPO_CLONE_FORK_ORG")
+        or cfg_fork.get("target_org")
+    )
+
+    # all_branches: CLI is two-flag mutex; if neither given, use config; else default
+    if args.fork_all:
+        all_branches = True
+    elif args.fork_default:
+        all_branches = False
+    else:
+        all_branches = bool(cfg_fork.get("all_branches", False))
+
+    fork_opts = ForkOptions(
+        enabled=args.fork,
+        target_org=target_org,
+        name_template=cfg_fork.get("name_template", "{repo}"),
+        name_literal=fork_name_literal,
+        all_branches=all_branches,
+        upstream_remote_name=cfg_fork.get("upstream_remote_name", "upstream"),
+    )
+
     try:
         if args.watch:
-            # Load config file
-            config = load_config()
-
-            # Build WatchConfig with precedence: CLI > config > defaults
             watch_config = WatchConfig(
                 interval=args.interval if args.interval != 0.5 else config.get("watch_interval", 0.5),
                 selection=args.selection if args.selection != "clipboard" else config.get("watch_selection", "clipboard"),
                 clipboard_command=config.get("clipboard_command"),
                 extra_hosts=config.get("extra_hosts", []),
             )
-
-            # Override CloneOptions from config if not set by CLI
-            if options.base_dir is None and "base_dir" in config:
-                base_dir_str = config["base_dir"]
-                if base_dir_str.startswith("~"):
-                    base_dir_str = os.path.expanduser(base_dir_str)
-                options.base_dir = Path(base_dir_str)
-
             exit_code = watch_clipboard(options, watch_config)
+        elif fork_opts.enabled:
+            exit_code = repo_clone_fork(args.url, options, fork_opts)
         else:
             exit_code = repo_clone(args.url, options)
         sys.exit(exit_code)
