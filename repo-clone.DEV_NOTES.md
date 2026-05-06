@@ -15,14 +15,34 @@ The original `repo-clone` was a bash script (~135 lines). It was rewritten in Py
 ### Key Architecture
 
 ```
-RepoInfo (dataclass)     - Parsed URL information
-CloneOptions (dataclass) - Runtime configuration
-parse_git_url()          - URL parsing (SSH, HTTPS, HuggingFace)
-run_git()                - Subprocess wrapper with dry-run support
-clone_repo()             - New repository clone
-update_repo()            - Existing repository update
-init_submodules()        - Submodule sync + init + update
+RepoInfo (dataclass)         - Parsed URL information
+CloneOptions (dataclass)     - Runtime clone/update configuration
+ForkOptions (dataclass)      - Resolved --fork settings
+ForkIdentity (dataclass)     - (target_org, fork_name, fork_clone_url)
+WatchConfig / WatchStats     - Watch mode
+
+parse_git_url()              - URL parsing (SSH, HTTPS, HuggingFace)
+load_config()                - pyyaml-or-stdlib-subset YAML loader
+parse_yaml_subset()          - Stdlib YAML-subset fallback
+emit()                       - Structured output (human / JSONL)
+gh_preflight()               - 'gh --version' + 'gh auth status'
+gh_authed_user()             - 'gh api user --jq .login'
+resolve_fork_identity()      - Apply template/literal + default to gh user
+fork_exists_on_github()      - 'gh api repos/{org}/{name}' idempotency probe
+create_github_fork()         - 'gh repo fork ...'
+clone_fork_with_retry()      - Reuse clone path, retry on just-created 404
+wire_upstream_remote()       - Idempotent 'git remote add upstream ...'
+repo_clone_fork()            - Orchestrator for --fork flow
+render_agent_help()          - Build --help-for-agents text
+run_git()                    - Subprocess wrapper with dry-run support
+clone_repo()                 - New repository clone
+update_repo()                - Existing repository update
+init_submodules()            - Submodule sync + init + update
 ```
+
+The script is structured in literate ordering: small helpers first, composing
+functions later, `main()` last. New code added since 2026-05-06 lives in
+banner-comment-delimited sections.
 
 ## Git Submodule Handling
 
@@ -175,9 +195,13 @@ repo-clone help-for-agents | head -40
 | File | Purpose |
 |------|---------|
 | `repo-clone` | Main Python3 script |
-| `repo-clone.bash.bak` | Original bash version (backup) |
-| `repo-clone.README.md` | User documentation |
+| `README.md` | GitHub landing page (concise) |
+| `repo-clone.README.md` | Full user manual (tiered) |
 | `repo-clone.DEV_NOTES.md` | This file |
+| `repo-clone.FUTURE_WORK.md` | Roadmap |
+| `docs/design/` | Scoped design rationale (one topic per file) |
+| `docs/repo-clone-TROUBLESHOOTING.md` | Symptom-keyed fixes |
+| `maintainers/` | Internal notes (orientation, tone, decisions) |
 
 ## Future Improvements
 
