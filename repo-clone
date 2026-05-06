@@ -264,33 +264,176 @@ def normalize_clone_url(info: RepoInfo) -> str:
         return f"https://{info.hosting}/{info.username}/{info.repo}.git"
 
 
-def load_config() -> dict:
-    """
-    Load configuration from ~/.config/shibuido/repo-clone/repo-clone-config.yaml
+# ---- Config file loading ----
+# Tiny stdlib YAML-subset reader. Used as fallback when pyyaml is not
+# installed. Handles only the schema documented in
+# docs/design/repo-clone-DESIGN-config-file.md:
+#   - top-level keys
+#   - one level of nested mappings
+#   - string and boolean scalars
+#   - lists of strings (one item per line, "  - item")
+# Anything outside this subset → ValueError("...install pyyaml...").
 
-    Returns empty dict if file doesn't exist or PyYAML not installed.
+_YAML_BOOLS = {"true": True, "false": False, "yes": True, "no": False}
+
+
+def _yaml_strip_value(raw: str) -> object:
+    """Strip a YAML scalar value into Python: bool, None, or string."""
+    s = raw.strip()
+    if not s:
+        return ""
+    # Strip surrounding quotes if balanced
+    if (s[0] == s[-1]) and s[0] in ("'", '"') and len(s) >= 2:
+        return s[1:-1]
+    low = s.lower()
+    if low in _YAML_BOOLS:
+        return _YAML_BOOLS[low]
+    if low == "null" or low == "~":
+        return None
+    return s
+
+
+def parse_yaml_subset(text: str) -> dict:
     """
-    config_path = Path.home() / ".config" / "shibuido" / "repo-clone" / "repo-clone-config.yaml"
+    Parse a small YAML subset. See module-level comment for scope.
+
+    Raises ValueError on any construct outside the subset.
+    """
+    result: dict = {}
+    current_top: Optional[str] = None         # active nested-mapping key
+    current_list_top: Optional[str] = None    # active list key (top-level)
+
+    for raw_line in text.splitlines():
+        # Strip comments (only when '#' is at line start or preceded by space)
+        line = raw_line.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        # Find the comment portion safely
+        if " #" in line:
+            line = line.split(" #", 1)[0].rstrip()
+
+        indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+
+        # List item: "- value", indented under a top-level list key
+        if stripped.startswith("- "):
+            item = _yaml_strip_value(stripped[2:])
+            if not isinstance(item, str):
+                raise ValueError(
+                    "config syntax beyond the stdlib subset (non-string list "
+                    "item); install pyyaml or simplify"
+                )
+            if current_list_top is None:
+                raise ValueError("list item without preceding key")
+            # If the key was pre-created as tentative {}, replace with list
+            if not isinstance(result.get(current_list_top), list):
+                result[current_list_top] = []
+            result[current_list_top].append(item)
+            continue
+
+        # Mapping line: "key:" or "key: value"
+        if ":" not in stripped:
+            raise ValueError(f"unrecognized line: {raw_line!r}")
+
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+
+        if indent == 0:
+            current_top = None
+            current_list_top = None
+            if value == "":
+                # Could be either a nested-mapping start or a list start.
+                # We don't know yet; mark both possibilities and resolve on
+                # the next line.
+                current_top = key
+                current_list_top = key
+                # Pre-create an empty dict; will be replaced with [] if a
+                # list item appears first.
+                result.setdefault(key, {})
+            else:
+                result[key] = _yaml_strip_value(value)
+        elif indent == 2 and current_top is not None:
+            # Nested mapping under current_top
+            target = result.get(current_top)
+            if not isinstance(target, dict):
+                # Was tentatively a list; demote to dict.
+                target = {}
+                result[current_top] = target
+            current_list_top = None  # nested mapping → not a list
+            if value == "":
+                raise ValueError(
+                    "config syntax beyond the stdlib subset (mapping nested "
+                    "deeper than 1 level); install pyyaml or simplify"
+                )
+            target[key] = _yaml_strip_value(value)
+        else:
+            raise ValueError(f"unsupported indentation level: {raw_line!r}")
+
+    # Cleanup: keys that were tentatively dicts but received list items
+    # are already handled. Empty tentative dicts that received nothing stay as {}.
+    return result
+
+
+def load_config(config_path: Optional[Path] = None) -> dict:
+    """
+    Load configuration from the canonical location, or an explicit path.
+
+    Resolution order:
+      1. config_path argument (if provided)
+      2. ~/.config/shibuido/repo-clone/repo-clone-config.yaml
+      3. ~/.config/shibuido/repo-clone/profiles/default.yaml (forward-compat)
+
+    Returns empty dict if no config file found.
+
+    Loader prefers pyyaml; falls back to parse_yaml_subset on ImportError.
+    On parse error, prints ERROR and exits nonzero.
+    """
+    if config_path is None:
+        base = Path.home() / ".config" / "shibuido" / "repo-clone"
+        candidates = [
+            base / "repo-clone-config.yaml",
+            base / "profiles" / "default.yaml",
+        ]
+        config_path = next((p for p in candidates if p.exists()), None)
+        if config_path is None:
+            log_debug("No config file found in canonical locations")
+            return {}
 
     if not config_path.exists():
-        log_debug(f"No config file at {config_path}")
+        log_warn(f"Config file not found: {config_path}")
         return {}
 
     try:
-        import yaml
+        text = config_path.read_text()
+    except OSError as e:
+        log_error(f"Cannot read config {config_path}: {e}")
+        sys.exit(ExitCode.PERMISSION_ERROR)
+
+    # Prefer pyyaml
+    try:
+        import yaml  # type: ignore
+        try:
+            config = yaml.safe_load(text) or {}
+            log_debug(f"Loaded config (pyyaml) from {config_path}")
+            return config
+        except Exception as e:
+            log_error(f"Failed to parse config {config_path}: {e}")
+            sys.exit(ExitCode.INVALID_URL)  # generic config-error exit
     except ImportError:
-        log_warn(f"Config file found but PyYAML not installed. Using defaults.\n"
-                 f"  Install with: pip install pyyaml")
-        return {}
+        pass
 
+    # Fallback: stdlib YAML-subset
     try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
-        log_debug(f"Loaded config from {config_path}: {config}")
+        config = parse_yaml_subset(text)
+        log_debug(f"Loaded config (stdlib subset) from {config_path}")
         return config
-    except Exception as e:
-        log_warn(f"Failed to parse config file: {e}")
-        return {}
+    except ValueError as e:
+        log_error(
+            f"Failed to parse config {config_path}: {e}\n"
+            f"  Hint: install pyyaml for richer YAML support, or simplify your config."
+        )
+        sys.exit(ExitCode.INVALID_URL)
 
 
 def detect_clipboard_backend(selection: str = "clipboard") -> Optional[List[List[str]]]:

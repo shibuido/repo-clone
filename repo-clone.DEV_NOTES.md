@@ -116,6 +116,23 @@ repo-clone --dry-run -v https://github.com/user/repo
 repo-clone --shallow --base-dir tmp https://github.com/user/large-repo
 ```
 
+### Stdlib YAML-subset config
+
+```bash
+# Without pyyaml installed:
+pip uninstall -y pyyaml 2>/dev/null
+
+mkdir -p ~/.config/shibuido/repo-clone
+cat > ~/.config/shibuido/repo-clone/repo-clone-config.yaml <<'EOF'
+fork:
+  target_org: VariousForks
+output:
+  show_info: true
+EOF
+
+repo-clone -vvv https://github.com/shibuido/repo-clone 2>&1 | grep "Loaded config (stdlib subset)"
+```
+
 ### Testing Submodule Fix
 
 ```bash
