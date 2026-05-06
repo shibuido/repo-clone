@@ -26,6 +26,8 @@ Features:
     - Clipboard watch mode for continuous cloning
 """
 
+from __future__ import annotations
+
 import sys
 import subprocess
 import argparse
