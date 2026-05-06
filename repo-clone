@@ -1582,6 +1582,122 @@ def repo_clone(url: str, options: CloneOptions) -> int:
         return ExitCode.INVALID_URL  # Never reached, but makes type checker happy
 
 
+# ---- Agent help ----
+# See docs/design/repo-clone-DESIGN-help-for-agents.md for the style contract.
+# Each section is a small string fragment so it can be edited independently.
+
+_AGENT_HELP_SECTIONS = {
+    "IDENTITY": """\
+repo-clone: paste-and-organize git repo cloner; optional --fork to create
++ clone a fork on the host. Path layout: $HOME/$host/$org/$repo (deterministic).
+""",
+    "INVOCATION": """\
+GRAMMAR
+  repo-clone <url>                                # clone or update
+  repo-clone --fork <url>                         # + create fork on host
+  repo-clone --watch                              # clipboard daemon mode
+  repo-clone --help                               # human help
+  repo-clone --help-for-agents | help-for-agents  # this output
+
+CANONICAL EXAMPLES
+  repo-clone https://github.com/acme/widget
+  repo-clone -F --fork-org VariousForks https://github.com/acme/widget
+  repo-clone --fork --fork-name greg/widget-experimental https://github.com/acme/widget
+  repo-clone --fork --jsonl https://github.com/acme/widget | jq -c
+""",
+    "EXIT_CODES": """\
+| code | meaning                                                |
+|------|--------------------------------------------------------|
+|   0  | success                                                |
+|   1  | invalid URL                                            |
+|   2  | clone failed                                           |
+|   3  | update failed                                          |
+|   4  | submodule operation failed                             |
+|   5  | permission error / unrelated dir at expected path      |
+|   6  | git-lfs missing (Hugging Face)                         |
+|   7  | no clipboard tool found (--watch)                      |
+|   8  | gh CLI missing or not authenticated                    |
+|   9  | host not supported for --fork (non-GitHub in v1)       |
+|  10  | gh repo fork failed                                    |
+|  11  | fork-name collision: target_org/name exists, not a     |
+|      | fork of source                                         |
+""",
+    "STATE_MACHINE": """\
+URL → parse → host_gate(github.com if --fork) → gh_preflight(if --fork) →
+  resolve_identity(URL, config, CLI) →
+  source_clone_or_update($base/$host/$src_org/$repo) →
+  IF --fork:
+    fork_existence_check(target_org, fork_name):
+      none      → gh repo fork --clone=false
+      matches   → INFO continue
+      mismatch  → ERROR exit 11
+    fork_clone_or_update($base/$host/$target_org/$fork_name) (retry on 404 ≤10s)
+    upstream_remote(absent→add | match→skip | differ→WARN)
+  emit summary
+""",
+    "JSONL_SCHEMA": """\
+--jsonl emits one compact JSON object per stdout line. Every record has:
+  {"event": "<name>", "level": "info"|"warn"|"error"|"debug", "ts": "<ISO-8601>", ...}
+Event names are stable; new fields/events are additive only.
+Full catalogue: docs/design/repo-clone-DESIGN-jsonl-output.md
+""",
+    "IDEMPOTENCY": """\
+Re-running the SAME invocation is safe:
+  source dir exists+repo → fetch+pull (skip pull if dirty)
+  fork on GH exists+matches → skip create
+  fork dir exists+origin matches → fetch+pull
+  upstream remote exists+matches → skip
+  upstream remote exists+differs → WARN, do NOT overwrite
+""",
+    "FAILURE_RECOVERY": """\
+TIMING ENVELOPES
+  fork creation:   5–30 s typical (GitHub-side; can spike during incidents)
+  large clone:     minutes (depends on repo size; --shallow helps)
+  gh preflight:    < 2 s
+
+RETRYABLE
+  fork clone 404 within ~10s of fork-created  (auto-retried up to ~10s)
+
+NOT AUTO-RETRIED  (treat as terminal; surface to user)
+  network failures (transient or persistent — caller should re-run)
+  gh auth failures (needs human intervention: `gh auth login`)
+  fork collisions (needs human intervention: choose new --fork-name)
+""",
+    "CONTEXTUAL_FIT": """\
+This tool sits inside agent workflows as the bookmark-and-clone step.
+Path layout invariant: every clone lives at $base/$host/$org/$repo where
+  $base    = options.base_dir or $HOME (overridable: --base-dir, REPO_CLONE_BASE_DIR)
+  $host    = shortcode of hosting domain (github, gitlab, codeberg, ...; HF keeps full domain)
+  $org     = source URL's org/user
+  $repo    = source URL's repo name (no .git suffix)
+
+Companion tools for searching cloned content on disk:
+  find-snapshot     # cached daily find index
+  sk -f PATTERN     # fuzzy file finder
+  fzf               # interactive selector
+""",
+    "TROUBLESHOOTING_POINTERS": """\
+LOCAL:  docs/repo-clone-TROUBLESHOOTING.md
+REMOTE: https://github.com/shibuido/repo-clone/blob/master/docs/repo-clone-TROUBLESHOOTING.md
+""",
+    "REPORT_BUGS": """\
+Issue tracker: https://github.com/shibuido/repo-clone/issues
+Recommended template:
+  Title:   [short symptom]
+  Body:    full failing command, full stderr, gh --version, git --version, OS
+  Labels:  byAI (if AI-authored)
+""",
+}
+
+
+def render_agent_help() -> str:
+    """Render the full --help-for-agents text."""
+    parts = ["repo-clone — agent help (for human help: `repo-clone --help`)\n"]
+    for name, body in _AGENT_HELP_SECTIONS.items():
+        parts.append(f"=== {name} ===\n{body.rstrip()}\n")
+    return "\n".join(parts)
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
