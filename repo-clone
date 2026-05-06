@@ -560,6 +560,126 @@ def wire_upstream_remote(
     )
 
 
+def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> int:
+    """
+    Orchestrate the --fork flow:
+      1. Parse URL  (must be GitHub for v1)
+      2. gh preflight
+      3. Resolve fork identity
+      4. Source-side clone/update
+      5. Idempotent fork creation
+      6. Fork-side clone (with retry)
+      7. Wire upstream remote
+      8. Emit summary
+
+    Returns the appropriate ExitCode.
+    """
+    try:
+        info = parse_git_url(url)
+    except ValueError as e:
+        emit("invalid-url", level="error", url=url, error=str(e))
+        return ExitCode.INVALID_URL
+
+    if info.hosting != "github.com":
+        emit(
+            "host-not-supported-for-fork",
+            level="error",
+            host=info.hosting,
+            hint=("v1 supports GitHub only. PRs welcome to add more hosts; "
+                  "see repo-clone.FUTURE_WORK.md and "
+                  "https://github.com/shibuido/repo-clone/issues"),
+        )
+        return ExitCode.HOST_NOT_SUPPORTED_FORK
+
+    if not gh_preflight():
+        return ExitCode.GH_MISSING
+
+    gh_user = gh_authed_user()
+    try:
+        ident = resolve_fork_identity(info, fork_opts, gh_user)
+    except ValueError as e:
+        emit("fork-identity-failed", level="error", error=str(e))
+        return ExitCode.GH_MISSING
+
+    emit(
+        "fork-identity-resolved",
+        level="info",
+        source_org=info.username,
+        source_repo=info.repo,
+        target_org=ident.target_org,
+        fork_name=ident.fork_name,
+        template=ident.template_used,
+    )
+
+    actions: List[str] = []
+
+    # 1. Source-side clone/update
+    src_rc = clone_repo(info, options)
+    if src_rc != ExitCode.SUCCESS:
+        return src_rc
+    actions.append("cloned-source")
+
+    # 2. Idempotent fork creation
+    is_self_org = (gh_user is not None and ident.target_org == gh_user)
+    exists, parent = fork_exists_on_github(ident.target_org, ident.fork_name)
+    expected_parent = f"{info.username}/{info.repo}"
+    if exists:
+        if parent == expected_parent:
+            emit("fork-exists", level="info",
+                 target_org=ident.target_org, fork_name=ident.fork_name,
+                 parent_full_name=parent)
+        else:
+            emit(
+                "fork-collision",
+                level="error",
+                target_org=ident.target_org,
+                fork_name=ident.fork_name,
+                parent_full_name=parent,
+                expected_parent=expected_parent,
+            )
+            return ExitCode.FORK_NAME_COLLISION
+    else:
+        rc = create_github_fork(
+            info, ident.target_org, ident.fork_name,
+            fork_opts.all_branches, is_self_org, dry_run=options.dry_run,
+        )
+        if rc != ExitCode.SUCCESS:
+            return rc
+        actions.append("created-fork")
+
+    # 3. Fork-side clone
+    fork_rc = clone_fork_with_retry(
+        ident.fork_clone_url, ident.target_org, ident.fork_name, options
+    )
+    if fork_rc != ExitCode.SUCCESS:
+        return fork_rc
+    actions.append("cloned-fork")
+
+    # 4. Wire upstream remote on fork
+    base = options.base_dir or Path.home()
+    fork_path = base / info.shortcode / ident.target_org / ident.fork_name
+    upstream_url = normalize_clone_url(info)
+    wire_upstream_remote(
+        fork_path,
+        upstream_url,
+        fork_opts.upstream_remote_name,
+        dry_run=options.dry_run,
+    )
+    actions.append("added-upstream")
+
+    # 5. Summary
+    src_path = base / info.shortcode / info.username / info.repo
+    emit(
+        "summary",
+        level="info",
+        source_path=str(src_path),
+        fork_path=str(fork_path),
+        actions=actions,
+    )
+
+    return ExitCode.SUCCESS
+
+
 @dataclass
 class RepoInfo:
     """Parsed repository information."""
