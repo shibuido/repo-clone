@@ -29,14 +29,46 @@ Features:
 from __future__ import annotations
 
 # =============================================================================
-# Architecture note for code readers
+# Architecture note — for code readers
 # =============================================================================
-# The script is laid out in literate order: small primitives come first,
-# composing helpers next, then orchestrators, with main() last. A reader
-# scrolling top-to-bottom should build the mental model as they go.
 #
-# Major subsystems in file order
-# --------------------------------
+# What this script does, plainly:
+#   repo-clone takes a git URL, figures out where the repo should live on disk
+#   ($HOME/$host/$org/$repo, always), and either clones it fresh or updates it
+#   if it already exists. With --fork, it first creates a GitHub fork (or
+#   verifies one already exists), then clones both the source and the fork —
+#   two real directories, each with the correct `origin` remote, and the fork
+#   side gets an `upstream` remote pointing back at the source. With --watch,
+#   it monitors the clipboard and clones anything that looks like a repo URL.
+#
+# The shape of this file as a journey:
+#   We start with the logging primitives (log_info, log_warn, log_error, log_debug)
+#   because everything that follows needs to emit output. On top of those we build
+#   the structured emit() layer — one function that handles both human-readable
+#   stderr lines and machine-parseable JSONL on stdout, so the --fork path can
+#   produce events that scripts can consume.
+#
+#   With output settled, we lay down the --fork-specific code: gh preflight,
+#   fork identity resolution, idempotent fork creation, fork-side clone with
+#   retry, upstream remote wiring, and repo_clone_fork() which orchestrates them
+#   all. These sections are new as of 2026-05-06 and represent most of the
+#   recent growth in the file.
+#
+#   The key seam: after repo_clone_fork() ends, the file transitions into the
+#   existing infrastructure that the fork code was built on top of — the
+#   dataclasses (RepoInfo, CloneOptions, WatchConfig, ForkOptions), URL parsing,
+#   config loading, watch mode, git execution helpers, clone_repo, and the
+#   original repo_clone orchestrator. That seam is marked explicitly below
+#   around line 770. If you're reading the new fork code and see a type you
+#   haven't found yet — RepoInfo, CloneOptions, ForkOptions — they live in the
+#   dataclasses block just past that seam.
+#
+#   At the end: agent help (_AGENT_HELP_SECTIONS / render_agent_help) followed
+#   by main(), which parses arguments, merges env + config + CLI, and dispatches
+#   to one of the three orchestrators: watch_clipboard, repo_clone_fork, or
+#   repo_clone.
+#
+# Major subsystems in file order:
 #  1. Logging primitives          — log_info / log_warn / log_error / log_debug
 #  2. Output / structured logging — emit(), set_output_mode(), two-mode design
 #  3. gh preflight                — verify gh present and authed before fork work
@@ -44,6 +76,7 @@ from __future__ import annotations
 #  5. Fork creation (idempotent)  — probe-then-create via gh api + gh repo fork
 #  6. Fork-side clone & upstream  — clone with retry, wire upstream remote
 #  7. Orchestrator: repo_clone_fork — stitches steps 3-6 together
+#  --- seam: new --fork code above / existing infrastructure below ---
 #  8. Dataclasses                 — RepoInfo, CloneOptions, WatchConfig, ForkOptions
 #  9. URL parsing helpers         — parse_git_url, normalize_clone_url
 # 10. Config file loading         — load_config + parse_yaml_subset (stdlib fallback)
@@ -54,31 +87,32 @@ from __future__ import annotations
 # 15. Agent help                  — _AGENT_HELP_SECTIONS dict + render_agent_help
 # 16. main()                      — argument parsing, env/config/CLI precedence, dispatch
 #
-# Design decisions worth knowing up front
-# -----------------------------------------
-# Stdlib only: no third-party runtime dependencies (pyyaml is optional; we fall
-# back to parse_yaml_subset). The rationale is portability — any Python 3.9+
-# install can run this without pip.
-# See docs/design/repo-clone-DESIGN-stdlib-portability.md.
+# Design decisions worth knowing up front:
 #
-# Two output modes: "human" (prefixed lines on stderr) and "jsonl" (compact
-# JSON on stdout). Humans need scannable INFO:/WARN:/ERROR: prefixes;
-# programmatic consumers need structured events they can parse reliably.
-# A single emit() call serves both paths.
-# See docs/design/repo-clone-DESIGN-jsonl-output.md.
+#   Stdlib only: no third-party runtime dependencies (pyyaml is optional; we fall
+#   back to parse_yaml_subset). The rationale is portability — any Python 3.9+
+#   install can run this without pip.
+#   See docs/design/repo-clone-DESIGN-stdlib-portability.md.
 #
-# Why shell out to gh (Q1 decision): GitHub's auth flow (OAuth, SSH, OIDC,
-# fine-grained PATs) is complex to implement correctly. gh already handles it.
-# We lean on `gh api` and `gh repo fork` rather than re-implementing the wheel.
+#   Two output modes: "human" (prefixed lines on stderr) and "jsonl" (compact
+#   JSON on stdout). Humans need scannable INFO:/WARN:/ERROR: prefixes;
+#   programmatic consumers need structured events they can parse reliably.
+#   A single emit() call serves both paths.
+#   See docs/design/repo-clone-DESIGN-jsonl-output.md.
 #
-# Why two clones for --fork (Q2 decision): we clone BOTH the source and the
-# fork. This preserves the "path tells you origin" invariant —
-# gh/acme/widget and gh/myfork/widget are unambiguously distinct directories,
-# each with the correct remote (origin vs upstream). Merging them would require
-# naming conventions or symlinks; two directories keeps the model simple.
+#   Why shell out to gh: GitHub's auth flow (OAuth, SSH, OIDC, fine-grained PATs)
+#   is complex to implement correctly. gh already handles it. We lean on
+#   `gh api` and `gh repo fork` rather than re-implementing the wheel.
 #
-# For the full "why" behind individual choices, see
+#   Why two clones for --fork: we clone BOTH the source and the fork. This
+#   preserves the "path tells you origin" invariant — gh/acme/widget and
+#   gh/myfork/widget are unambiguously distinct directories, each with the
+#   correct remote (origin vs upstream). Merging them would require naming
+#   conventions or symlinks; two directories keeps the model simple.
+#
+# For the "why" behind individual choices, see
 # docs/design/repo-clone-MAINTAINERS-decisions.md (dated decision log).
+# For schemas and contracts, see docs/design/.
 # =============================================================================
 
 import sys
@@ -174,13 +208,23 @@ def error_exit(msg: str, code: int = 1) -> None:
 
 # ---- Output / structured logging ----
 # Now that we have basic logging primitives, we need a single output channel
-# that supports both human-mode prefixed lines AND programmatic JSONL events.
-# The emit() function below is the new code's preferred way to surface
-# user-visible information; the legacy log_* helpers stay in place for older
-# call sites. Two output modes: "human" (INFO:/WARN:/ERROR: prefixes on stderr)
-# and "jsonl" (one JSON object per line on stdout). See
-# docs/design/repo-clone-DESIGN-output-prefixes.md and
+# that serves both human-mode prefixed lines AND programmatic JSONL events.
+# The emit() function is the new code's preferred way to surface user-visible
+# information; the legacy log_* helpers stay in place for older call sites.
+#
+# Two output modes:
+#   "human" — INFO:/WARN:/ERROR: prefixed lines on stderr. Stderr keeps the
+#             human-readable chatter away from stdout so that shell pipelines
+#             work naturally (e.g., `repo-clone <url> 2>/dev/null`).
+#   "jsonl"  — one compact JSON object per line on stdout. Stdout because
+#             script consumers pipe stdout through `jq`, `python -c`, etc.;
+#             they expect the structured stream there, not on stderr.
+# emit() picks the stream based on the current mode — no caller needs to know.
+#
+# See docs/design/repo-clone-DESIGN-output-prefixes.md and
 # docs/design/repo-clone-DESIGN-jsonl-output.md.
+# The next section (gh preflight) is the first caller that uses emit() for
+# all user-visible signals.
 
 import json as _json
 from datetime import datetime, timezone
@@ -227,6 +271,9 @@ def emit(event: str, *, level: str = "info", **fields) -> None:
     if _OUTPUT_MODE == "jsonl":
         record = {"event": event, "level": level, "ts": _now_iso(), **fields}
         line = _json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+        # JSONL goes to stdout so pipe consumers (`jq`, `python -c`) see it on
+        # the expected stream. Human-mode text (below) goes to stderr so it
+        # doesn't pollute stdout when the caller isn't consuming JSONL.
         out = _OUTPUT_STREAM if _OUTPUT_STREAM is not None else sys.stdout
         print(line, file=out, flush=True)
         return
@@ -255,10 +302,20 @@ def emit(event: str, *, level: str = "info", **fields) -> None:
 
 
 # ---- gh preflight ----
-# With output covered, the first thing the --fork path needs is to verify that
-# gh is available and authenticated. We bail early with actionable hints if not
-# — debugging `gh repo fork` failures from inside a longer flow is much harder
-# than failing at preflight. See docs/design/repo-clone-DESIGN-fork-flag.md.
+# With output covered, the first thing the --fork path needs is a working `gh`
+# CLI. Without it, fork creation, existence probes, and user lookups all fail.
+# Rather than discover that mid-flow, we check upfront and bail with actionable
+# hints if anything is wrong — "install gh" or "run gh auth login" is much more
+# useful when it appears before the first operation, not buried in a subprocess
+# error after five seconds of progress.
+#
+# Two helpers: gh_preflight() does the version + auth check and emits structured
+# events rather than raising or returning tuples. That's deliberate: every
+# user-visible signal in the new code goes through emit() so --jsonl mode
+# captures everything, including preflight failures.
+# gh_authed_user() pulls the authenticated login (used as the default fork
+# target when --fork-org is not configured). After these two, we have everything
+# we need to resolve the fork's identity. See docs/design/repo-clone-DESIGN-fork-flag.md.
 
 def gh_preflight() -> bool:
     """
@@ -320,11 +377,19 @@ def gh_authed_user() -> Optional[str]:
 
 
 # ---- Fork identity resolution ----
-# Given a source URL like acme/widget, we need to compute where the fork should
-# land: which org, what name. Precedence is CLI flags > env vars > config >
-# defaults. Templates allow {repo}-by-{org}-fork-style transforms; org/name
-# shorthand on --fork-name keeps the keyboard ergonomics tight. The resolved
-# triple (target_org, fork_name, fork_clone_url) is bundled into ForkIdentity.
+# With gh confirmed working, we can now compute where the fork should land:
+# which org, what name. Precedence is CLI flags > env vars > config > defaults.
+# Templates allow {repo}-by-{org}-fork-style transforms; the org/name shorthand
+# on --fork-name keeps keyboard ergonomics tight (one flag, no --fork-org).
+# The resolved triple (target_org, fork_name, fork_clone_url) is bundled into
+# ForkIdentity and passed down to the creation and clone steps.
+#
+# Forward reference: functions here take `info: RepoInfo` and `opts: ForkOptions`
+# as parameters. Both are dataclasses defined further down (~line 800) with the
+# rest of the existing infrastructure. For now, treat RepoInfo as "the parsed URL"
+# (hosting, shortcode, username, repo) and ForkOptions as "the resolved --fork
+# settings" (target_org, name_template, name_literal, upstream_remote_name, etc.).
+#
 # See docs/design/repo-clone-DESIGN-fork-flag.md for the full precedence spec.
 
 @dataclass
@@ -411,10 +476,16 @@ def resolve_fork_identity(
 
 
 # ---- Fork creation (idempotent) ----
-# Re-running --fork must be safe. We probe with `gh api` first; if the fork
-# already exists with the right parent, we skip creation silently. If a repo
-# with the same name exists but isn't a fork of our source, we error out (exit
-# 11) rather than risk surprising the user with a silently-overwritten repo.
+# With identity resolved, we know exactly what we want: target_org/fork_name.
+# Before creating, we probe via `gh api` to see if that repo already exists.
+# Re-running --fork must be safe — it's a normal workflow for users cloning
+# a fork they created in a previous session. Three outcomes:
+#   not found         → create the fork (gh repo fork)
+#   found, right parent → skip creation, continue (idempotent)
+#   found, wrong parent → ERROR exit 11; won't silently collide
+# The collision check protects against a subtle case: a user may have a repo
+# at target_org/fork_name that has nothing to do with the source. We'd rather
+# error loudly than accidentally treat an unrelated repo as the fork.
 # See docs/design/repo-clone-DESIGN-fork-flag.md for the idempotency contract.
 
 def fork_exists_on_github(target_org: str, fork_name: str) -> Tuple[bool, Optional[str]]:
@@ -602,6 +673,11 @@ def wire_upstream_remote(
     * Present and matches → skip (emit upstream-already-correct).
     * Present and differs → WARN, do not overwrite (emit upstream-mismatch).
     """
+    # remote_name is parameterized (not hardcoded to "upstream") because the
+    # config's fork.upstream_remote_name key lets users override the convention.
+    # Some teams use "source" or "primary" instead of "upstream", and some have
+    # existing clones with a different name already set. The caller passes
+    # fork_opts.upstream_remote_name, which defaults to "upstream" if unset.
     try:
         result = run_git(
             ["remote", "get-url", remote_name],
@@ -766,6 +842,28 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
     )
 
     return ExitCode.SUCCESS
+
+
+# ============================================================
+# Up to here: the new --fork code paths (gh preflight, fork identity,
+# fork creation, fork-side clone, upstream wiring, and the repo_clone_fork
+# orchestrator that stitches them together).
+#
+# From here on: the existing infrastructure that --fork was built on top of.
+#
+# What's coming next:
+#   - Dataclasses — RepoInfo, CloneOptions, WatchConfig, ForkOptions
+#     (you saw forward references to these throughout the fork code above;
+#      here they are in full)
+#   - parse_git_url and normalize_clone_url — URL parsing
+#   - parse_yaml_subset and load_config — config loading with stdlib fallback
+#   - detect_clipboard_backend / read_clipboard / extract_repo_url /
+#     watch_clipboard — the existing --watch mode
+#   - run_git, check_local_changes, init_submodules, update_repo — git helpers
+#   - clone_repo — the clone/update primitive used by ALL three orchestrators
+#   - repo_clone — the original orchestrator for the non-fork path
+#   - render_agent_help and main() — the entry points
+# ============================================================
 
 
 @dataclass
@@ -934,18 +1032,22 @@ def normalize_clone_url(info: RepoInfo) -> str:
 
 
 # ---- Config file loading ----
-# The config file is optional. If pyyaml is installed we use it; if not, the
-# stdlib YAML-subset reader (parse_yaml_subset) handles the documented schema
-# (top-level keys, one-level mappings, lists of strings). Anything richer raises
-# with an "install pyyaml" pointer. load_config() is now called on ALL paths
-# (not just --watch) so fork: and output: sections are available everywhere.
-# Schema: docs/design/repo-clone-DESIGN-config-file.md
-# Tiny stdlib YAML-subset reader handles only:
-#   - top-level keys
-#   - one level of nested mappings
+# With the dataclasses and URL helpers in place, we can load the config file.
+# The config is optional — missing file means empty dict, not an error. If
+# pyyaml is installed we use it; if not, parse_yaml_subset handles the
+# documented schema without any third-party dependency. The subset is enough
+# for the documented config options; anything richer raises with an
+# "install pyyaml" pointer rather than silently misparse.
+#
+# load_config() is called on ALL paths (not just --watch) so the fork: and
+# output: sections are available to every orchestrator.
+#
+# The stdlib subset handles only:
+#   - top-level keys and one level of nested mappings
 #   - string and boolean scalars
 #   - lists of strings (one item per line, "  - item")
 # Anything outside this subset → ValueError("...install pyyaml...").
+# Schema: docs/design/repo-clone-DESIGN-config-file.md
 
 _YAML_BOOLS = {"true": True, "false": False, "yes": True, "no": False}
 
@@ -954,6 +1056,11 @@ def _yaml_strip_value(raw: str) -> object:
     """Strip a YAML scalar value into Python: bool, None, or string."""
     s = raw.strip()
     if not s:
+        # Return "" rather than None for empty scalars. Our usage pattern is
+        # config.get("section", {}).get("key") and then a truthiness check;
+        # "" is falsy like None but avoids surprising callers that test
+        # `if value is not None`. Standard YAML would return None here, but
+        # None-vs-empty-string ambiguity is a common config bug.
         return ""
     # Strip surrounding quotes if balanced
     if (s[0] == s[-1]) and s[0] in ("'", '"') and len(s) >= 2:
@@ -1676,10 +1783,12 @@ def repo_clone(url: str, options: CloneOptions) -> int:
 
 
 # ---- Agent help ----
-# Humans get --help; agents get --help-for-agents. The agent output is denser:
-# tables, exit-code semantics, JSONL contract, state-machine summary. The
-# fragments live in a dict so each section is independently editable without
-# touching the assembly logic; render_agent_help() is just the join step.
+# With all three orchestrators (repo_clone, repo_clone_fork, watch_clipboard)
+# defined, we can describe the tool to its callers. Humans get --help (handled
+# by argparse); agents get --help-for-agents, which is denser: tables,
+# exit-code semantics, JSONL contract, state-machine summary. The fragments
+# live in a dict so each section is independently editable without touching the
+# assembly logic; render_agent_help() is just the join step.
 # See docs/design/repo-clone-DESIGN-help-for-agents.md for the style contract.
 
 _AGENT_HELP_SECTIONS = {
@@ -1981,6 +2090,11 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
         upstream_remote_name=cfg_fork.get("upstream_remote_name", "upstream"),
     )
 
+    # --- dispatch: at this point, args are validated, config is merged, options
+    # and fork_opts are built. We hand off to one of three orchestrators:
+    #   --watch          → watch_clipboard  (continuous clipboard loop)
+    #   --fork (implied) → repo_clone_fork  (gh fork + two clones)
+    #   (default)        → repo_clone       (single clone or update)
     try:
         if args.watch:
             watch_config = WatchConfig(
