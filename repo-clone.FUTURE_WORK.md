@@ -16,6 +16,11 @@ These items from earlier FUTURE_WORK are now landed:
 * [ ] `wire_upstream_remote` URL comparison: handle `url.insteadOf` rewrites
   so repeat runs don't WARN when stored remote URL is the rewritten form
   (e.g. `git@github.com:org/repo` vs `https://github.com/org/repo`)
+* [ ] `summary.actions` reports `added-upstream` even on re-runs where
+  `wire_upstream_remote` took the WARN-mismatch (skip) path. Cosmetic only;
+  the actions list should distinguish `added` / `confirmed` / `mismatched`.
+  Discovered during the 2026-05-07 wet-run integration test (see
+  `docs/qa/repo-clone-QA-fork-wettest.md`).
 
 ## Consider Adding
 
