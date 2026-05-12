@@ -23,6 +23,9 @@ fork:
   name_template: "{repo}-by-{org}-fork"   # Default: "{repo}"
   all_branches: false              # Default: false (matches GitHub webui)
   upstream_remote_name: upstream   # Default: "upstream"
+  about_suffix: ""                 # Appended to fork "About" description.
+                                   # Default: "(forked using repo-clone CLI https://github.com/shibuido/repo-clone)"
+                                   # Set to "" or false to disable.
 
 # New: output section
 output:

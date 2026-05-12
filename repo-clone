@@ -75,7 +75,8 @@ from __future__ import annotations
 #  4. Fork identity resolution    — compute (target_org, fork_name, clone_url)
 #  5. Fork creation (idempotent)  — probe-then-create via gh api + gh repo fork
 #  6. Fork-side clone & upstream  — clone with retry, wire upstream remote
-#  7. Orchestrator: repo_clone_fork — stitches steps 3-6 together
+#  7. About-description update    — append attribution suffix to fork's GitHub "About"
+#  8. Orchestrator: repo_clone_fork — stitches steps 3-7 together
 #  --- seam: new --fork code above / existing infrastructure below ---
 #  8. Dataclasses                 — RepoInfo, CloneOptions, WatchConfig, ForkOptions
 #  9. URL parsing helpers         — parse_git_url, normalize_clone_url
@@ -721,6 +722,70 @@ def wire_upstream_remote(
     )
 
 
+def update_fork_about(
+    target_org: str,
+    fork_name: str,
+    about_suffix: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    Append about_suffix to the fork's GitHub "About" description if not already present.
+
+    Idempotent: fetches the current description first; skips if suffix is already there.
+    Failures are WARN-level (non-fatal) — the clone is already done and useful.
+    """
+    if not about_suffix:
+        return
+
+    try:
+        fetch = subprocess.run(
+            ["gh", "api", f"repos/{target_org}/{fork_name}",
+             "--jq", ".description // \"\""],
+            capture_output=True, text=True, timeout=15,
+        )
+        if fetch.returncode != 0:
+            emit("fork-about-fetch-failed", level="warn",
+                 target_org=target_org, fork_name=fork_name,
+                 stderr=(fetch.stderr or "").strip()[:200])
+            return
+        current_desc = fetch.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-about-fetch-failed", level="warn",
+             target_org=target_org, fork_name=fork_name, error=str(e))
+        return
+
+    if about_suffix in current_desc:
+        emit("fork-about-already-set", level="info",
+             target_org=target_org, fork_name=fork_name)
+        return
+
+    new_desc = f"{current_desc} {about_suffix}".strip()
+
+    if dry_run:
+        emit("fork-about-updating", level="info",
+             target_org=target_org, fork_name=fork_name,
+             new_description=new_desc, dry_run=True)
+        return
+
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{target_org}/{fork_name}",
+             "-X", "PATCH", "-f", f"description={new_desc}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            emit("fork-about-update-failed", level="warn",
+                 target_org=target_org, fork_name=fork_name,
+                 stderr=(result.stderr or "").strip()[:200])
+            return
+        emit("fork-about-updated", level="info",
+             target_org=target_org, fork_name=fork_name,
+             description=new_desc)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-about-update-failed", level="warn",
+             target_org=target_org, fork_name=fork_name, error=str(e))
+
+
 def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> int:
     """
     Orchestrate the --fork flow:
@@ -831,7 +896,15 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
     )
     actions.append("added-upstream")
 
-    # 5. Summary
+    # 5. Update fork "About" description with attribution suffix
+    if fork_opts.about_suffix:
+        update_fork_about(
+            ident.target_org, ident.fork_name,
+            fork_opts.about_suffix,
+            dry_run=options.dry_run,
+        )
+
+    # 6. Summary
     src_path = base / info.shortcode / info.username / info.repo
     emit(
         "summary",
@@ -907,6 +980,11 @@ class WatchStats:
     seen_urls: set = field(default_factory=set)
 
 
+_DEFAULT_FORK_ABOUT_SUFFIX = (
+    "(forked using repo-clone CLI https://github.com/shibuido/repo-clone)"
+)
+
+
 @dataclass
 class ForkOptions:
     """
@@ -918,6 +996,7 @@ class ForkOptions:
     name_literal: Optional[str] = None
     all_branches: bool = False
     upstream_remote_name: str = "upstream"
+    about_suffix: str = _DEFAULT_FORK_ABOUT_SUFFIX
 
 
 def extract_hosting_shortcode(hosting: str) -> str:
@@ -1839,6 +1918,7 @@ URL → parse → host_gate(github.com if --fork) → gh_preflight(if --fork) �
       mismatch  → ERROR exit 11
     fork_clone_or_update($base/$host/$target_org/$fork_name) (retry on 404 ≤10s)
     upstream_remote(absent→add | match→skip | differ→WARN)
+    update_fork_about(append suffix to GH "About" unless already present; WARN on failure)
   emit summary
 """,
     "JSONL_SCHEMA": """\
@@ -2081,6 +2161,15 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
     else:
         all_branches = bool(cfg_fork.get("all_branches", False))
 
+    # about_suffix: empty string or false in config disables the attribution append
+    cfg_about = cfg_fork.get("about_suffix")
+    if cfg_about is None:
+        about_suffix = _DEFAULT_FORK_ABOUT_SUFFIX
+    elif cfg_about is False or cfg_about == "":
+        about_suffix = ""
+    else:
+        about_suffix = str(cfg_about)
+
     fork_opts = ForkOptions(
         enabled=args.fork,
         target_org=target_org,
@@ -2088,6 +2177,7 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
         name_literal=fork_name_literal,
         all_branches=all_branches,
         upstream_remote_name=cfg_fork.get("upstream_remote_name", "upstream"),
+        about_suffix=about_suffix,
     )
 
     # --- dispatch: at this point, args are validated, config is merged, options
