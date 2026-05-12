@@ -58,6 +58,17 @@ isn't a fork of the source you specified. To resolve:
 A directory at the expected clone destination exists but has no `.git`.
 Move it out of the way (or delete if you're sure it's safe) and re-run.
 
+## "WARN: upstream-mismatch"
+
+The fork cloned with a different org or name than your config now expects. Most
+common cause: no config file existed on first run, so the tool defaulted to your
+gh-authed user instead of `fork.target_org`.
+
+Fix — create the config (see
+[Configuration tier](../repo-clone.README.md#configuration-tier)), then re-run
+the same command. It is idempotent. If an unwanted fork was created on GitHub,
+delete it there manually.
+
 ## "WARN: upstream remote points to X (expected Y)"
 
 The fork-side clone already has an `upstream` remote, but it doesn't match

@@ -118,6 +118,10 @@ Hugging Face, SourceHut. Want another host? Open an issue or PR.
 
 ## Configuration tier
 
+```bash
+mkdir -p ~/.config/shibuido/repo-clone
+```
+
 Create `~/.config/shibuido/repo-clone/repo-clone-config.yaml`:
 
 ```yaml
