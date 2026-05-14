@@ -6,10 +6,20 @@ These items from earlier FUTURE_WORK are now landed:
 
 * ✅ Config file (`~/.config/shibuido/repo-clone/repo-clone-config.yaml`) —
   shipped 2026-05-06 with `fork:` and `output:` sections.
+* ✅ GitLab nested subgroup parsing + `{namespace}` template vars + per-host
+  `fork.<shortcode>.*` config sections — shipped 2026-05-14. `RepoInfo` now
+  carries `namespace_path: List[str]`; on-disk layout mirrors the full chain
+  (`~/gitlab/group/sub/repo`). The `/-/` UI-resource sentinel is stripped.
+  Template vars: `{namespace}`, `{namespace_slash}`, `{parent}`, `{top}`,
+  `{host}` (plus `{org}` as legacy alias).
+* ✅ `--fork` for GitLab via `glab` — shipped 2026-05-15. Mirrors the gh
+  flow: `glab_preflight`, `glab_authed_user`, `fork_exists_on_gitlab`,
+  `create_gitlab_fork`, `update_fork_about_gitlab`. `glab repo fork` has
+  no flag to target a different namespace, so fork creation drives
+  `POST projects/:id/fork` via `glab api` directly with `namespace_path`.
+  New exit code `13` (`GLAB_MISSING`).
 
 ## Investigate
-
-* [ ] GitLab subgroups: `https://gitlab.com/group/subgroup/repo` — verify parsing
 * [ ] Bitbucket URL format support
 * [ ] SSH config aliases (e.g., `git@gh:user/repo` where `gh` is Host alias)
 * [ ] Minimum `gh` version supporting `--default-branch-only` — document the floor
@@ -32,7 +42,6 @@ These items from earlier FUTURE_WORK are now landed:
 
 ## --fork roadmap
 
-* [ ] `--fork` for GitLab (uses `gh`-equivalent? or `glab`?)
 * [ ] `--fork` for Codeberg / Forgejo
 * [ ] `--fork` for Bitbucket
 * [ ] `--profile NAME` flag + `~/.config/shibuido/repo-clone/profiles/*.yaml`

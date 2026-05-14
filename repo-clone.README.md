@@ -64,12 +64,18 @@ repo-clone --fork https://github.com/acme/widget
 # → ~/github/acme/widget                  (upstream clone, ready to read)
 # → ~/github/<you>/widget                  (fork on GitHub, cloned, with
 #                                             upstream remote auto-wired)
+
+repo-clone --fork https://gitlab.com/gitlab-org/orbit/knowledge-graph
+# → ~/gitlab/gitlab-org/orbit/knowledge-graph                (upstream clone)
+# → ~/gitlab/<you-or-org>/<name-from-template>               (fork, cloned,
+#                                                              upstream wired)
 ```
 
-Requires `gh` (GitHub CLI) authenticated:
+Requires the matching host CLI authenticated — `gh` for GitHub, `glab` for GitLab:
 
 ```bash
-gh auth login
+gh auth login    # for github.com URLs
+glab auth login  # for gitlab.com URLs
 ```
 
 Re-running is idempotent: existing forks are detected and the local clones
@@ -131,18 +137,43 @@ extra_hosts:
 watch_interval: 0.5
 watch_selection: clipboard
 
-# Fork defaults (used by --fork)
+# Fork defaults (used by --fork). Top-level keys apply to all hosts; per-host
+# blocks (fork.<shortcode>.*) override them when the URL matches that host.
 fork:
-  target_org: VariousForks
-  name_template: "{repo}-by-{org}-fork"
   all_branches: false
   upstream_remote_name: upstream
+
+  github:
+    target_org: VariousForks
+    name_template: "{repo}-by-{parent}-fork"
+
+  gitlab:
+    target_org: yourname
+    # {namespace} = full group chain joined with '-'. For depth-1 URLs (GitHub-
+    # shaped) it equals {parent}. For nested GitLab subgroups it captures the
+    # whole chain so the flattened personal-namespace fork stays unambiguous.
+    # gitlab-org/orbit/knowledge-graph -> knowledge-graph-by-gitlab-org-orbit-fork
+    name_template: "{repo}-by-{namespace}-fork"
 
 # Output preferences
 output:
   mode: human                  # or "jsonl"
   show_info: false             # if true, INFO: lines visible at -v0
 ```
+
+### Fork name template variables
+
+`fork.<host>.name_template` (or top-level `fork.name_template`) substitutes:
+
+| Variable | For `gitlab-org/orbit/knowledge-graph` | For `torvalds/linux` |
+|---|---|---|
+| `{repo}` | `knowledge-graph` | `linux` |
+| `{namespace}` | `gitlab-org-orbit` (chain joined with `-`) | `torvalds` |
+| `{namespace_slash}` | `gitlab-org/orbit` (raw, with `/`) | `torvalds` |
+| `{parent}` | `orbit` (last namespace segment) | `torvalds` |
+| `{top}` | `gitlab-org` (first namespace segment) | `torvalds` |
+| `{host}` | `gitlab` (hosting shortcode) | `github` |
+| `{org}` | alias for `{parent}` (legacy) | `torvalds` |
 
 Precedence (highest wins): **CLI flags > env vars > config file > defaults.**
 
@@ -231,15 +262,21 @@ Multi-account / multi-profile support is on the roadmap.
 | 6 | git-lfs missing (Hugging Face) |
 | 7 | No clipboard tool found (`--watch`) |
 | 8 | `gh` CLI missing or not authenticated |
-| 9 | Host not yet supported for `--fork` (non-GitHub) |
-| 10 | Fork creation API call failed |
+| 9 | Host not yet supported for `--fork` (non-GitHub/GitLab) |
+| 10 | Fork creation API call failed (`gh` or `glab`) |
 | 11 | Fork name collision (target exists, parent mismatch) |
+| 12 | Configuration error (invalid template / unresolvable target_org) |
+| 13 | `glab` CLI missing or not authenticated |
 
 ### URL formats supported
 
 * SSH: `git@github.com:user/repo.git`
 * HTTPS: `https://github.com/user/repo.git`
 * HTTPS without .git: `https://github.com/user/repo`
+* GitLab nested subgroups: `https://gitlab.com/group/subgroup/.../repo`
+  (the `/-/` UI-resource sentinel is stripped, so URLs copied from a tree/blob/MR
+  page also work). On disk these mirror the full chain:
+  `~/gitlab/group/subgroup/.../repo`.
 * Hugging Face: `https://huggingface.co/user/model`
 
 ---
