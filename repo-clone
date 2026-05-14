@@ -125,7 +125,7 @@ import time
 import shutil
 import signal
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
 from enum import IntEnum
@@ -142,10 +142,11 @@ class ExitCode:
     GIT_LFS_FAILED = 6
     NO_CLIPBOARD_TOOL = 7
     GH_MISSING = 8                 # gh CLI missing or unauthed
-    HOST_NOT_SUPPORTED_FORK = 9    # --fork on non-GitHub URL
-    FORK_CREATION_FAILED = 10      # gh repo fork failed
+    HOST_NOT_SUPPORTED_FORK = 9    # --fork on host without an integration (codeberg/bitbucket)
+    FORK_CREATION_FAILED = 10      # fork API call (gh / glab) failed
     FORK_NAME_COLLISION = 11       # target name exists, parent differs
     CONFIG_ERROR = 12
+    GLAB_MISSING = 13              # glab CLI missing or unauthed
 
 
 class VerboseLevel(IntEnum):
@@ -377,6 +378,257 @@ def gh_authed_user() -> Optional[str]:
     return None
 
 
+# ---- glab preflight ----
+# Mirror of the gh preflight pair, for the GitLab --fork path. The structure
+# is identical so the dispatch in repo_clone_fork can pick one or the other by
+# host without special-casing inside the orchestrator. Failures emit
+# `glab-missing` / `glab-unauthed` so --jsonl consumers can tell GitHub and
+# GitLab CLI problems apart.
+
+def glab_preflight() -> bool:
+    """Verify glab is installed and authenticated. True on success."""
+    if shutil.which("glab") is None:
+        emit(
+            "glab-missing",
+            level="error",
+            hint="install GitLab CLI: https://gitlab.com/gitlab-org/cli  (then run `glab auth login`)",
+        )
+        return False
+    try:
+        ver = subprocess.run(
+            ["glab", "--version"], capture_output=True, text=True, timeout=10
+        )
+        if ver.returncode != 0:
+            emit("glab-missing", level="error", hint="glab --version exited nonzero")
+            return False
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("glab-missing", level="error", hint=f"glab --version: {e}")
+        return False
+
+    try:
+        auth = subprocess.run(
+            ["glab", "auth", "status"], capture_output=True, text=True, timeout=10
+        )
+        if auth.returncode != 0:
+            emit(
+                "glab-unauthed",
+                level="error",
+                hint="run `glab auth login` to authenticate the GitLab CLI",
+            )
+            return False
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("glab-unauthed", level="error", hint=f"glab auth status: {e}")
+        return False
+
+    first_line = ver.stdout.strip().splitlines()[0] if ver.stdout else ""
+    emit("glab-preflight-ok", level="info", glab_version=first_line)
+    return True
+
+
+def glab_authed_user() -> Optional[str]:
+    """Return the authenticated GitLab username, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["glab", "api", "user", "--jq", ".username"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def _gitlab_path_with_namespace(info: RepoInfo) -> str:
+    """Return the 'group[/sub...]/project' string for a GitLab RepoInfo.
+
+    For nested subgroups this preserves the full namespace chain — the form
+    the GitLab API expects (URL-encoded as a single project identifier).
+    """
+    ns = info.namespace_path or [info.username]
+    return "/".join(ns + [info.repo])
+
+
+# ---- glab fork existence & creation ----
+# `glab repo fork` only forks into the authenticated user's personal namespace
+# and offers no flag to target a different group, so for VariousForks-style
+# org forks we drive the REST API directly via `glab api`. The encoding
+# matters: GitLab's project endpoint takes a URL-encoded path-with-namespace
+# (e.g. `gitlab-org%2Forbit%2Fknowledge-graph`) as the project ID — `%2F` for
+# every `/` in the chain, regardless of depth.
+
+def fork_exists_on_gitlab(target_namespace: str, fork_name: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check whether a project exists at gitlab.com/{target_namespace}/{fork_name}.
+
+    Returns (exists, parent_path_with_namespace). parent is None when the
+    project exists but is not a fork.
+    """
+    encoded = quote(f"{target_namespace}/{fork_name}", safe="")
+    try:
+        result = subprocess.run(
+            ["glab", "api", f"projects/{encoded}",
+             "--jq", ".forked_from_project.path_with_namespace // \"\""],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-existence-check-failed", level="warn", error=str(e))
+        return (False, None)
+
+    if result.returncode == 0:
+        parent = result.stdout.strip() or None
+        return (True, parent)
+
+    err = (result.stderr or "")
+    if "404" in err or "Not Found" in err:
+        return (False, None)
+    emit(
+        "fork-existence-check-failed",
+        level="warn",
+        glab_exit=result.returncode,
+        stderr=err.strip()[:200],
+    )
+    return (False, None)
+
+
+def create_gitlab_fork(
+    info: RepoInfo,
+    target_namespace: str,
+    fork_name: str,
+    dry_run: bool = False,
+) -> int:
+    """
+    Create a fork via `glab api POST projects/:id/fork`. Returns ExitCode.SUCCESS
+    or ExitCode.FORK_CREATION_FAILED.
+
+    Unlike `gh repo fork`, glab's `repo fork` subcommand can't target a different
+    namespace, so we use the REST API directly with namespace_path/name/path.
+    """
+    source = _gitlab_path_with_namespace(info)
+    encoded_source = quote(source, safe="")
+    cmd = [
+        "glab", "api", "-X", "POST",
+        f"projects/{encoded_source}/fork",
+        "-F", f"namespace_path={target_namespace}",
+        "-F", f"name={fork_name}",
+        "-F", f"path={fork_name}",
+    ]
+
+    if dry_run:
+        emit(
+            "fork-creating",
+            level="info",
+            source=source,
+            target_org=target_namespace,
+            fork_name=fork_name,
+            dry_run=True,
+            cmd=" ".join(cmd),
+        )
+        return ExitCode.SUCCESS
+
+    emit(
+        "fork-creating",
+        level="info",
+        source=source,
+        target_org=target_namespace,
+        fork_name=fork_name,
+    )
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-creation-failed", level="error",
+             source=source, target_org=target_namespace, fork_name=fork_name,
+             error=str(e))
+        return ExitCode.FORK_CREATION_FAILED
+
+    if result.returncode != 0:
+        emit(
+            "fork-creation-failed",
+            level="error",
+            source=source,
+            target_org=target_namespace,
+            fork_name=fork_name,
+            glab_exit_code=result.returncode,
+            stderr=(result.stderr or "").strip()[:500],
+        )
+        return ExitCode.FORK_CREATION_FAILED
+
+    clone_url = f"https://gitlab.com/{target_namespace}/{fork_name}.git"
+    emit(
+        "fork-created",
+        level="info",
+        source=source,
+        target_org=target_namespace,
+        fork_name=fork_name,
+        clone_url=clone_url,
+    )
+    return ExitCode.SUCCESS
+
+
+def update_fork_about_gitlab(
+    target_namespace: str,
+    fork_name: str,
+    about_suffix: str,
+    dry_run: bool = False,
+) -> None:
+    """
+    GitLab counterpart to update_fork_about: append about_suffix to the fork
+    project's description if not already present. Non-fatal on failure.
+    """
+    if not about_suffix:
+        return
+
+    encoded = quote(f"{target_namespace}/{fork_name}", safe="")
+    try:
+        fetch = subprocess.run(
+            ["glab", "api", f"projects/{encoded}",
+             "--jq", ".description // \"\""],
+            capture_output=True, text=True, timeout=15,
+        )
+        if fetch.returncode != 0:
+            emit("fork-about-fetch-failed", level="warn",
+                 target_org=target_namespace, fork_name=fork_name,
+                 stderr=(fetch.stderr or "").strip()[:200])
+            return
+        current_desc = fetch.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-about-fetch-failed", level="warn",
+             target_org=target_namespace, fork_name=fork_name, error=str(e))
+        return
+
+    if about_suffix in current_desc:
+        emit("fork-about-already-set", level="info",
+             target_org=target_namespace, fork_name=fork_name)
+        return
+
+    new_desc = f"{current_desc} {about_suffix}".strip()
+
+    if dry_run:
+        emit("fork-about-updating", level="info",
+             target_org=target_namespace, fork_name=fork_name,
+             new_description=new_desc, dry_run=True)
+        return
+
+    try:
+        result = subprocess.run(
+            ["glab", "api", "-X", "PUT", f"projects/{encoded}",
+             "-F", f"description={new_desc}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            emit("fork-about-update-failed", level="warn",
+                 target_org=target_namespace, fork_name=fork_name,
+                 stderr=(result.stderr or "").strip()[:200])
+            return
+        emit("fork-about-updated", level="info",
+             target_org=target_namespace, fork_name=fork_name,
+             description=new_desc)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        emit("fork-about-update-failed", level="warn",
+             target_org=target_namespace, fork_name=fork_name, error=str(e))
+
+
 # ---- Fork identity resolution ----
 # With gh confirmed working, we can now compute where the fork should land:
 # which org, what name. Precedence is CLI flags > env vars > config > defaults.
@@ -452,21 +704,40 @@ def resolve_fork_identity(
         fork_name = opts.name_literal
         template_used = "(literal)"
     else:
+        ns_path = info.namespace_path or [info.username]
+        # {namespace}: full chain joined with '-' so it's a valid project slug
+        # (GitLab/GitHub slugs forbid '/'). For depth-1 URLs this equals
+        # {top} == {parent} == {org}. For nested gitlab subgroups it captures
+        # the whole group chain.
+        namespace_joined = "-".join(ns_path)
+        # {parent} = direct owner (last segment of namespace). For GitHub that's
+        # the user/org; for gitlab subgroups it's the immediate parent group.
+        parent = ns_path[-1]
+        # {top} = first segment of namespace. For depth-1 == {parent}.
+        top = ns_path[0]
         try:
             fork_name = opts.name_template.format(
                 repo=info.repo,
-                org=info.username,
+                org=parent,                       # legacy alias for {parent}
                 host=info.shortcode,
+                namespace=namespace_joined,
+                namespace_slash="/".join(ns_path),
+                parent=parent,
+                top=top,
             )
             template_used = opts.name_template
         except (KeyError, IndexError) as e:
             raise ValueError(
                 f"fork.name_template uses unknown variable: {e}; "
-                f"available: {{repo}}, {{org}}, {{host}}"
+                f"available: {{repo}}, {{org}}, {{host}}, {{namespace}}, "
+                f"{{namespace_slash}}, {{parent}}, {{top}}"
             )
 
-    # Fork clone URL (always HTTPS for the v1 GitHub-only path)
-    fork_clone_url = f"https://github.com/{target_org}/{fork_name}.git"
+    # Fork clone URL — HTTPS on the source's hosting domain. Forks live on the
+    # same host as the source (e.g. github→github, gitlab→gitlab); we never
+    # cross-host fork. v1 only actually executes this for github.com; the gitlab
+    # branch is gated upstream by HOST_NOT_SUPPORTED_FORK until glab support lands.
+    fork_clone_url = f"https://{info.hosting}/{target_org}/{fork_name}.git"
 
     return ForkIdentity(
         target_org=target_org,
@@ -905,7 +1176,8 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
         )
 
     # 6. Summary
-    src_path = base / info.shortcode / info.username / info.repo
+    ns_segments = info.namespace_path or [info.username]
+    src_path = base.joinpath(info.shortcode, *ns_segments, info.repo)
     emit(
         "summary",
         level="info",
@@ -944,11 +1216,17 @@ class RepoInfo:
     """Parsed repository information."""
     hosting: str              # Full hosting domain (e.g., "github.com")
     shortcode: str            # Short name (e.g., "github")
-    username: str             # User or organization name
+    username: str             # First namespace segment — direct owner for GitHub,
+                              # top-level group for GitLab. Equals namespace_path[0].
     repo: str                 # Repository name (without .git)
     is_ssh: bool              # True if SSH URL format
     is_huggingface: bool      # True if Hugging Face repo
     original_url: str         # Original URL for reference
+    namespace_path: List[str] = field(default_factory=list)
+                              # Full chain of namespace segments before the project.
+                              # GitHub: always [username] (length 1). GitLab supports
+                              # nested subgroups, so e.g. gitlab-org/orbit/knowledge-graph
+                              # yields ["gitlab-org", "orbit"]. Hugging Face: [username].
 
 
 @dataclass
@@ -1049,46 +1327,55 @@ def parse_git_url(url: str) -> RepoInfo:
             repo=repo,
             is_ssh=False,
             is_huggingface=True,
-            original_url=original_url
+            original_url=original_url,
+            namespace_path=[username],
         )
 
-    # Check for SSH format: git@host:user/repo.git
+    # Check for SSH format: git@host:user/repo.git (or nested groups: user/group/repo.git)
     ssh_match = re.match(r'^(?:ssh://)?git@([^:/]+)[:/](.+)$', url)
     if ssh_match:
         hosting = ssh_match.group(1)
         path = ssh_match.group(2)
-        parts = path.strip('/').split('/')
+        parts = [p for p in path.strip('/').split('/') if p]
         if len(parts) < 2:
             raise ValueError(f"Cannot extract user/repo from SSH URL: {url}")
-        username = parts[0]
-        repo = parts[1].removesuffix('.git')
+        repo = parts[-1].removesuffix('.git')
+        namespace_path = parts[:-1]
         return RepoInfo(
             hosting=hosting,
             shortcode=extract_hosting_shortcode(hosting),
-            username=username,
+            username=namespace_path[0],
             repo=repo,
             is_ssh=True,
             is_huggingface=False,
-            original_url=original_url
+            original_url=original_url,
+            namespace_path=namespace_path,
         )
 
     # Parse as HTTPS URL
     if url.startswith(('http://', 'https://')):
         parsed = urlparse(url)
         hosting = parsed.netloc
-        path_parts = parsed.path.strip('/').split('/')
+        # Strip GitLab's /-/<resource>/... sentinel so URLs like
+        # gitlab.com/group/sub/repo/-/tree/main resolve to group/sub/repo.
+        path = parsed.path
+        sentinel = path.find('/-/')
+        if sentinel != -1:
+            path = path[:sentinel]
+        path_parts = [p for p in path.strip('/').split('/') if p]
         if len(path_parts) < 2:
             raise ValueError(f"Cannot extract user/repo from HTTPS URL: {url}")
-        username = path_parts[0]
-        repo = path_parts[1].removesuffix('.git')
+        repo = path_parts[-1].removesuffix('.git')
+        namespace_path = path_parts[:-1]
         return RepoInfo(
             hosting=hosting,
             shortcode=extract_hosting_shortcode(hosting),
-            username=username,
+            username=namespace_path[0],
             repo=repo,
             is_ssh=False,
             is_huggingface=False,
-            original_url=original_url
+            original_url=original_url,
+            namespace_path=namespace_path,
         )
 
     raise ValueError(
@@ -1102,12 +1389,13 @@ def parse_git_url(url: str) -> RepoInfo:
 
 def normalize_clone_url(info: RepoInfo) -> str:
     """Reconstruct a normalized clone URL from RepoInfo."""
+    ns = "/".join(info.namespace_path) if info.namespace_path else info.username
     if info.is_huggingface:
-        return f"https://huggingface.co/{info.username}/{info.repo}"
+        return f"https://huggingface.co/{ns}/{info.repo}"
     elif info.is_ssh:
-        return f"git@{info.hosting}:{info.username}/{info.repo}.git"
+        return f"git@{info.hosting}:{ns}/{info.repo}.git"
     else:
-        return f"https://{info.hosting}/{info.username}/{info.repo}.git"
+        return f"https://{info.hosting}/{ns}/{info.repo}.git"
 
 
 # ---- Config file loading ----
@@ -1156,10 +1444,14 @@ def parse_yaml_subset(text: str) -> dict:
     """
     Parse a small YAML subset. See module-level comment for scope.
 
+    Supports up to 2 levels of nested mappings (e.g. fork.github.target_org),
+    plus top-level lists of strings.
+
     Raises ValueError on any construct outside the subset.
     """
     result: dict = {}
-    current_top: Optional[str] = None         # active nested-mapping key
+    current_top: Optional[str] = None         # active nested-mapping key (indent 0)
+    current_mid: Optional[str] = None         # active second-level mapping key (indent 2)
     current_list_top: Optional[str] = None    # active list key (top-level)
 
     for raw_line in text.splitlines():
@@ -1200,6 +1492,7 @@ def parse_yaml_subset(text: str) -> dict:
 
         if indent == 0:
             current_top = None
+            current_mid = None
             current_list_top = None
             if value == "":
                 # We can't tell from "key:" alone whether the next lines will
@@ -1214,19 +1507,36 @@ def parse_yaml_subset(text: str) -> dict:
             else:
                 result[key] = _yaml_strip_value(value)
         elif indent == 2 and current_top is not None:
-            # Nested mapping under current_top
+            # Second-level: nested mapping or a sub-mapping header under current_top.
             target = result.get(current_top)
             if not isinstance(target, dict):
                 # Was tentatively a list; demote to dict.
                 target = {}
                 result[current_top] = target
-            current_list_top = None  # nested mapping → not a list
+            current_list_top = None
+            current_mid = None
+            if value == "":
+                # Opening a third-level mapping (e.g. fork: → github: → ...).
+                current_mid = key
+                target.setdefault(key, {})
+            else:
+                target[key] = _yaml_strip_value(value)
+        elif indent == 4 and current_top is not None and current_mid is not None:
+            # Third-level scalar under current_top.current_mid. Used for the
+            # per-host fork config pattern (fork.<host>.<key>).
+            outer = result.get(current_top)
+            if not isinstance(outer, dict):
+                raise ValueError(f"unexpected nesting at: {raw_line!r}")
+            inner = outer.get(current_mid)
+            if not isinstance(inner, dict):
+                inner = {}
+                outer[current_mid] = inner
             if value == "":
                 raise ValueError(
                     "config syntax beyond the stdlib subset (mapping nested "
-                    "deeper than 1 level); install pyyaml or simplify"
+                    "deeper than 2 levels); install pyyaml or simplify"
                 )
-            target[key] = _yaml_strip_value(value)
+            inner[key] = _yaml_strip_value(value)
         else:
             raise ValueError(f"unsupported indentation level: {raw_line!r}")
 
@@ -1763,13 +2073,18 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
     """
     Clone repository with submodule support.
 
-    Directory structure: {base_dir}/{shortcode}/{username}/{repo}
+    Directory structure: {base_dir}/{shortcode}/{namespace_path...}/{repo}
+
+    For flat namespaces (GitHub, depth-1 GitLab) this is {shortcode}/{user}/{repo}
+    as before. For GitLab nested subgroups, the full chain is preserved on disk:
+    {shortcode}/{group}/{subgroup}/.../{repo} — matches upstream layout.
 
     Returns:
         0 on success, non-zero on failure
     """
     base = options.base_dir or Path.home()
-    parent_dir = base / info.shortcode / info.username
+    ns_segments = info.namespace_path or [info.username]
+    parent_dir = base.joinpath(info.shortcode, *ns_segments)
     repo_path = parent_dir / info.repo
 
     # Check if repo already exists
@@ -1787,7 +2102,9 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
     try:
         if not options.dry_run:
             parent_dir.mkdir(parents=True, exist_ok=True)
-        log_info(f"Created directory: {parent_dir}")
+            log_info(f"Created directory: {parent_dir}")
+        else:
+            log_info(f"Would create directory: {parent_dir}")
     except PermissionError as e:
         error_exit(f"Cannot create directory {parent_dir}: {e}", ExitCode.PERMISSION_ERROR)
 
@@ -1854,7 +2171,8 @@ def repo_clone(url: str, options: CloneOptions) -> int:
     """
     try:
         info = parse_git_url(url)
-        log_info(f"Parsed URL: {info.shortcode}/{info.username}/{info.repo}")
+        ns_display = "/".join(info.namespace_path) if info.namespace_path else info.username
+        log_info(f"Parsed URL: {info.shortcode}/{ns_display}/{info.repo}")
         return clone_repo(info, options)
     except ValueError as e:
         error_exit(str(e), ExitCode.INVALID_URL)
@@ -2145,12 +2463,37 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
             )
         args.fork_org = fork_name_org_override
 
-    # Precedence: CLI flag > env var > config file > built-in default.
-    cfg_fork = config.get("fork", {}) if isinstance(config.get("fork"), dict) else {}
+    # Precedence: CLI flag > env var > per-host fork config > top-level fork config > defaults.
+    # Per-host sections (fork.github.*, fork.gitlab.*, ...) override top-level fork.* keys
+    # for URLs on that host. This lets a single config carry different fork targets,
+    # name templates, and upstream conventions per host without juggling profiles.
+    cfg_fork_root = config.get("fork", {}) if isinstance(config.get("fork"), dict) else {}
+    # Pre-parse the URL just to learn the shortcode (host section selector).
+    # Watch mode is disallowed with --fork above, so args.url is guaranteed here.
+    host_shortcode: Optional[str] = None
+    if args.fork and args.url:
+        try:
+            host_shortcode = parse_git_url(args.url).shortcode
+        except ValueError:
+            host_shortcode = None  # let the real parse error surface in the orchestrator
+    cfg_fork_host = (
+        cfg_fork_root.get(host_shortcode, {})
+        if host_shortcode and isinstance(cfg_fork_root.get(host_shortcode), dict)
+        else {}
+    )
+
+    def _fork_cfg(key, default=None):
+        """fork.<host>.<key>  overrides  fork.<key>  overrides  default."""
+        if key in cfg_fork_host:
+            return cfg_fork_host[key]
+        if key in cfg_fork_root:
+            return cfg_fork_root[key]
+        return default
+
     target_org = (
         args.fork_org
         or os.environ.get("REPO_CLONE_FORK_ORG")
-        or cfg_fork.get("target_org")
+        or _fork_cfg("target_org")
     )
 
     # all_branches: CLI is two-flag mutex; if neither given, use config; else default
@@ -2159,10 +2502,10 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
     elif args.fork_default:
         all_branches = False
     else:
-        all_branches = bool(cfg_fork.get("all_branches", False))
+        all_branches = bool(_fork_cfg("all_branches", False))
 
     # about_suffix: empty string or false in config disables the attribution append
-    cfg_about = cfg_fork.get("about_suffix")
+    cfg_about = _fork_cfg("about_suffix")
     if cfg_about is None:
         about_suffix = _DEFAULT_FORK_ABOUT_SUFFIX
     elif cfg_about is False or cfg_about == "":
@@ -2173,10 +2516,10 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
     fork_opts = ForkOptions(
         enabled=args.fork,
         target_org=target_org,
-        name_template=cfg_fork.get("name_template", "{repo}"),
+        name_template=_fork_cfg("name_template", "{repo}"),
         name_literal=fork_name_literal,
         all_branches=all_branches,
-        upstream_remote_name=cfg_fork.get("upstream_remote_name", "upstream"),
+        upstream_remote_name=_fork_cfg("upstream_remote_name", "upstream"),
         about_suffix=about_suffix,
     )
 
