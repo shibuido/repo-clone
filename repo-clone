@@ -427,14 +427,19 @@ def glab_preflight() -> bool:
 
 def glab_authed_user() -> Optional[str]:
     """Return the authenticated GitLab username, or None on failure."""
+    # glab api doesn't support --jq (a gh-specific flag), so we parse the
+    # full JSON response with the stdlib here and in the other glab_* helpers.
     try:
         result = subprocess.run(
-            ["glab", "api", "user", "--jq", ".username"],
+            ["glab", "api", "user"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
+            data = _json.loads(result.stdout)
+            username = data.get("username")
+            if username:
+                return str(username)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
     return None
 
@@ -467,8 +472,7 @@ def fork_exists_on_gitlab(target_namespace: str, fork_name: str) -> Tuple[bool, 
     encoded = quote(f"{target_namespace}/{fork_name}", safe="")
     try:
         result = subprocess.run(
-            ["glab", "api", f"projects/{encoded}",
-             "--jq", ".forked_from_project.path_with_namespace // \"\""],
+            ["glab", "api", f"projects/{encoded}"],
             capture_output=True, text=True, timeout=15,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
@@ -476,7 +480,14 @@ def fork_exists_on_gitlab(target_namespace: str, fork_name: str) -> Tuple[bool, 
         return (False, None)
 
     if result.returncode == 0:
-        parent = result.stdout.strip() or None
+        try:
+            data = _json.loads(result.stdout)
+        except ValueError as e:
+            emit("fork-existence-check-failed", level="warn",
+                 error=f"invalid JSON from glab: {e}")
+            return (False, None)
+        parent_obj = data.get("forked_from_project") or {}
+        parent = parent_obj.get("path_with_namespace") or None
         return (True, parent)
 
     err = (result.stderr or "")
@@ -582,8 +593,7 @@ def update_fork_about_gitlab(
     encoded = quote(f"{target_namespace}/{fork_name}", safe="")
     try:
         fetch = subprocess.run(
-            ["glab", "api", f"projects/{encoded}",
-             "--jq", ".description // \"\""],
+            ["glab", "api", f"projects/{encoded}"],
             capture_output=True, text=True, timeout=15,
         )
         if fetch.returncode != 0:
@@ -591,7 +601,13 @@ def update_fork_about_gitlab(
                  target_org=target_namespace, fork_name=fork_name,
                  stderr=(fetch.stderr or "").strip()[:200])
             return
-        current_desc = fetch.stdout.strip()
+        try:
+            current_desc = (_json.loads(fetch.stdout).get("description") or "").strip()
+        except ValueError as e:
+            emit("fork-about-fetch-failed", level="warn",
+                 target_org=target_namespace, fork_name=fork_name,
+                 error=f"invalid JSON: {e}")
+            return
     except (subprocess.TimeoutExpired, OSError) as e:
         emit("fork-about-fetch-failed", level="warn",
              target_org=target_namespace, fork_name=fork_name, error=str(e))
@@ -735,8 +751,8 @@ def resolve_fork_identity(
 
     # Fork clone URL — HTTPS on the source's hosting domain. Forks live on the
     # same host as the source (e.g. github→github, gitlab→gitlab); we never
-    # cross-host fork. v1 only actually executes this for github.com; the gitlab
-    # branch is gated upstream by HOST_NOT_SUPPORTED_FORK until glab support lands.
+    # cross-host fork. Both github.com and gitlab.com are wired in
+    # repo_clone_fork; other hosts return HOST_NOT_SUPPORTED_FORK there.
     fork_clone_url = f"https://{info.hosting}/{target_org}/{fork_name}.git"
 
     return ForkIdentity(
@@ -1060,8 +1076,8 @@ def update_fork_about(
 def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> int:
     """
     Orchestrate the --fork flow:
-      1. Parse URL  (must be GitHub for v1)
-      2. gh preflight
+      1. Parse URL  (GitHub or GitLab; other hosts → HOST_NOT_SUPPORTED_FORK)
+      2. Host CLI preflight (gh for GitHub, glab for GitLab)
       3. Resolve fork identity
       4. Source-side clone/update
       5. Idempotent fork creation
@@ -1077,23 +1093,35 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
         emit("invalid-url", level="error", url=url, error=str(e))
         return ExitCode.INVALID_URL
 
-    if info.hosting != "github.com":
+    # Host dispatch: pick the CLI integration for this host. Adding a new host
+    # means adding helpers (like glab_*) above and another branch here. Hosts
+    # without an integration return HOST_NOT_SUPPORTED_FORK (codeberg, bitbucket).
+    if info.hosting == "github.com":
+        host_kind = "github"
+    elif info.hosting == "gitlab.com":
+        host_kind = "gitlab"
+    else:
         emit(
             "host-not-supported-for-fork",
             level="error",
             host=info.hosting,
-            hint=("v1 supports GitHub only. PRs welcome to add more hosts; "
+            hint=("v1 supports GitHub and GitLab. PRs welcome to add more hosts; "
                   "see repo-clone.FUTURE_WORK.md and "
                   "https://github.com/shibuido/repo-clone/issues"),
         )
         return ExitCode.HOST_NOT_SUPPORTED_FORK
 
-    if not gh_preflight():
-        return ExitCode.GH_MISSING
+    if host_kind == "github":
+        if not gh_preflight():
+            return ExitCode.GH_MISSING
+        authed_user = gh_authed_user()
+    else:  # gitlab
+        if not glab_preflight():
+            return ExitCode.GLAB_MISSING
+        authed_user = glab_authed_user()
 
-    gh_user = gh_authed_user()
     try:
-        ident = resolve_fork_identity(info, fork_opts, gh_user)
+        ident = resolve_fork_identity(info, fork_opts, authed_user)
     except ValueError as e:
         emit("fork-identity-failed", level="error", error=str(e))
         return ExitCode.CONFIG_ERROR
@@ -1111,18 +1139,25 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
     actions: List[str] = []
 
     # 1. Source-side clone/update (deliberately before fork creation).
-    # A bad URL fails here before we touch any GitHub state. The source clone
+    # A bad URL fails here before we touch any host state. The source clone
     # is independently useful even if fork creation later fails — no rollback
-    # is needed because we haven't mutated anything on GitHub yet.
+    # is needed because we haven't mutated anything on the host yet.
     src_rc = clone_repo(info, options)
     if src_rc != ExitCode.SUCCESS:
         return src_rc
     actions.append("cloned-source")
 
-    # 2. Idempotent fork creation
-    is_self_org = (gh_user is not None and ident.target_org == gh_user)
-    exists, parent = fork_exists_on_github(ident.target_org, ident.fork_name)
-    expected_parent = f"{info.username}/{info.repo}"
+    # 2. Idempotent fork creation. expected_parent semantics differ by host:
+    # GitHub's parent.full_name is `<owner>/<repo>`; GitLab's
+    # forked_from_project.path_with_namespace is the full subgroup chain
+    # joined by '/'. For depth-1 URLs (all GitHub, top-level GitLab) the
+    # two coincide; for nested GitLab subgroups the chain matters.
+    if host_kind == "github":
+        expected_parent = f"{info.username}/{info.repo}"
+        exists, parent = fork_exists_on_github(ident.target_org, ident.fork_name)
+    else:  # gitlab
+        expected_parent = _gitlab_path_with_namespace(info)
+        exists, parent = fork_exists_on_gitlab(ident.target_org, ident.fork_name)
     if exists:
         if parent == expected_parent:
             emit("fork-exists", level="info",
@@ -1139,10 +1174,17 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
             )
             return ExitCode.FORK_NAME_COLLISION
     else:
-        rc = create_github_fork(
-            info, ident.target_org, ident.fork_name,
-            fork_opts.all_branches, is_self_org, dry_run=options.dry_run,
-        )
+        if host_kind == "github":
+            is_self_org = (authed_user is not None and ident.target_org == authed_user)
+            rc = create_github_fork(
+                info, ident.target_org, ident.fork_name,
+                fork_opts.all_branches, is_self_org, dry_run=options.dry_run,
+            )
+        else:  # gitlab
+            rc = create_gitlab_fork(
+                info, ident.target_org, ident.fork_name,
+                dry_run=options.dry_run,
+            )
         if rc != ExitCode.SUCCESS:
             return rc
         actions.append("created-fork")
@@ -1167,13 +1209,20 @@ def repo_clone_fork(url: str, options: CloneOptions, fork_opts: ForkOptions) -> 
     )
     actions.append("added-upstream")
 
-    # 5. Update fork "About" description with attribution suffix
+    # 5. Update fork description with attribution suffix
     if fork_opts.about_suffix:
-        update_fork_about(
-            ident.target_org, ident.fork_name,
-            fork_opts.about_suffix,
-            dry_run=options.dry_run,
-        )
+        if host_kind == "github":
+            update_fork_about(
+                ident.target_org, ident.fork_name,
+                fork_opts.about_suffix,
+                dry_run=options.dry_run,
+            )
+        else:  # gitlab
+            update_fork_about_gitlab(
+                ident.target_org, ident.fork_name,
+                fork_opts.about_suffix,
+                dry_run=options.dry_run,
+            )
 
     # 6. Summary
     ns_segments = info.namespace_path or [info.username]
