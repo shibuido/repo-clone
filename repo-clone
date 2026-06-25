@@ -12,6 +12,7 @@ This script clones repositories organized under:
 Examples:
     repo-clone git@github.com:user/repo.git
     repo-clone https://github.com/user/repo
+    repo-clone https://gist.github.com/user/0123456789abcdef
     repo-clone https://huggingface.co/TheBloke/model
     repo-clone --shallow https://github.com/user/large-repo
     repo-clone --watch                    # Monitor clipboard
@@ -34,12 +35,14 @@ from __future__ import annotations
 #
 # What this script does, plainly:
 #   repo-clone takes a git URL, figures out where the repo should live on disk
-#   ($HOME/$host/$org/$repo, always), and either clones it fresh or updates it
-#   if it already exists. With --fork, it first creates a GitHub fork (or
+#   ($HOME/$host/$org/$repo for normal repos), and either clones it fresh or
+#   updates it if it already exists. With --fork, it first creates a GitHub fork (or
 #   verifies one already exists), then clones both the source and the fork —
 #   two real directories, each with the correct `origin` remote, and the fork
-#   side gets an `upstream` remote pointing back at the source. With --watch,
-#   it monitors the clipboard and clones anything that looks like a repo URL.
+#   side gets an `upstream` remote pointing back at the source. GitHub Gists
+#   are the one layout exception: they live under $HOME/github/_gist/$owner/$id.
+#   With --watch, it monitors the clipboard and clones anything that looks like
+#   a repo URL.
 #
 # The shape of this file as a journey:
 #   We start with the logging primitives (log_info, log_warn, log_error, log_debug)
@@ -131,6 +134,9 @@ from typing import Optional, List, Tuple
 from enum import IntEnum
 
 
+__version__ = "0.1.0"
+
+
 # Exit codes
 class ExitCode:
     SUCCESS = 0
@@ -163,6 +169,7 @@ VERBOSITY = 0  # VerboseLevel.SILENT
 # Built-in recognized repository hosts
 BUILTIN_HOSTS = [
     "github.com",
+    "gist.github.com",
     "gitlab.com",
     "codeberg.org",
     "bitbucket.org",
@@ -170,6 +177,11 @@ BUILTIN_HOSTS = [
     "sr.ht",
     "git.sr.ht",
 ]
+
+GIST_HOST = "gist.github.com"
+GIST_SHORTCODE = "github"
+GIST_NAMESPACE = "_gist"
+GIST_ANONYMOUS_OWNER = "anonymous"
 
 
 def log_info(msg: str) -> None:
@@ -1276,6 +1288,9 @@ class RepoInfo:
                               # GitHub: always [username] (length 1). GitLab supports
                               # nested subgroups, so e.g. gitlab-org/orbit/knowledge-graph
                               # yields ["gitlab-org", "orbit"]. Hugging Face: [username].
+                              # Gist: ["_gist", owner], so it lands under
+                              # github/_gist/<owner>/<gist-id>.
+    is_gist: bool = False     # True for GitHub Gist repositories.
 
 
 @dataclass
@@ -1343,6 +1358,19 @@ def is_huggingface_url(url: str) -> bool:
     return url.startswith("https://huggingface.co/")
 
 
+def _parse_gist_path(parts: List[str], url: str) -> Tuple[str, str]:
+    """Return (owner, gist_id) for gist.github.com path parts."""
+    if len(parts) == 1:
+        return (GIST_ANONYMOUS_OWNER, parts[0].removesuffix(".git"))
+    if len(parts) == 2:
+        return (parts[0], parts[1].removesuffix(".git"))
+    raise ValueError(
+        f"Invalid GitHub Gist URL: {url}\n"
+        "Expected https://gist.github.com/<gist-id> or "
+        "https://gist.github.com/<user>/<gist-id>"
+    )
+
+
 def parse_git_url(url: str) -> RepoInfo:
     """
     Parse various git URL formats into normalized RepoInfo.
@@ -1386,6 +1414,19 @@ def parse_git_url(url: str) -> RepoInfo:
         hosting = ssh_match.group(1)
         path = ssh_match.group(2)
         parts = [p for p in path.strip('/').split('/') if p]
+        if hosting == GIST_HOST:
+            owner, gist_id = _parse_gist_path(parts, url)
+            return RepoInfo(
+                hosting=hosting,
+                shortcode=GIST_SHORTCODE,
+                username=owner,
+                repo=gist_id,
+                is_ssh=True,
+                is_huggingface=False,
+                original_url=original_url,
+                namespace_path=[GIST_NAMESPACE, owner],
+                is_gist=True,
+            )
         if len(parts) < 2:
             raise ValueError(f"Cannot extract user/repo from SSH URL: {url}")
         repo = parts[-1].removesuffix('.git')
@@ -1412,6 +1453,19 @@ def parse_git_url(url: str) -> RepoInfo:
         if sentinel != -1:
             path = path[:sentinel]
         path_parts = [p for p in path.strip('/').split('/') if p]
+        if hosting == GIST_HOST:
+            owner, gist_id = _parse_gist_path(path_parts, url)
+            return RepoInfo(
+                hosting=hosting,
+                shortcode=GIST_SHORTCODE,
+                username=owner,
+                repo=gist_id,
+                is_ssh=False,
+                is_huggingface=False,
+                original_url=original_url,
+                namespace_path=[GIST_NAMESPACE, owner],
+                is_gist=True,
+            )
         if len(path_parts) < 2:
             raise ValueError(f"Cannot extract user/repo from HTTPS URL: {url}")
         repo = path_parts[-1].removesuffix('.git')
@@ -1439,7 +1493,16 @@ def parse_git_url(url: str) -> RepoInfo:
 def normalize_clone_url(info: RepoInfo) -> str:
     """Reconstruct a normalized clone URL from RepoInfo."""
     ns = "/".join(info.namespace_path) if info.namespace_path else info.username
-    if info.is_huggingface:
+    if info.is_gist:
+        owner = info.username
+        if owner == GIST_ANONYMOUS_OWNER:
+            gist_path = info.repo
+        else:
+            gist_path = f"{owner}/{info.repo}"
+        if info.is_ssh:
+            return f"git@{GIST_HOST}:{gist_path}.git"
+        return f"https://{GIST_HOST}/{gist_path}.git"
+    elif info.is_huggingface:
         return f"https://huggingface.co/{ns}/{info.repo}"
     elif info.is_ssh:
         return f"git@{info.hosting}:{ns}/{info.repo}.git"
@@ -2252,6 +2315,7 @@ GRAMMAR
 
 CANONICAL EXAMPLES
   repo-clone https://github.com/acme/widget
+  repo-clone https://gist.github.com/acme/0123456789abcdef
   repo-clone -F --fork-org VariousForks https://github.com/acme/widget
   repo-clone --fork --fork-name greg/widget-experimental https://github.com/acme/widget
   repo-clone --fork --jsonl https://github.com/acme/widget | jq -c
@@ -2273,6 +2337,7 @@ CANONICAL EXAMPLES
 |  11  | fork-name collision: target_org/name exists, not a     |
 |      | fork of source                                         |
 |  12  | config file parse error                                |
+|  13  | glab CLI missing or not authenticated                  |
 """,
     "STATE_MACHINE": """\
 URL → parse → host_gate(github.com if --fork) → gh_preflight(if --fork) →
@@ -2323,6 +2388,7 @@ Path layout invariant: every clone lives at $base/$host/$org/$repo where
   $host    = shortcode of hosting domain (github, gitlab, codeberg, ...; HF keeps full domain)
   $org     = source URL's org/user
   $repo    = source URL's repo name (no .git suffix)
+Special case: GitHub Gists live at $base/github/_gist/$user_or_anonymous/$gist_id.
 
 Companion tools for searching cloned content on disk:
   find-snapshot     # cached daily find index
@@ -2371,6 +2437,7 @@ def main() -> None:
 Examples:
   %(prog)s git@github.com:user/repo.git
   %(prog)s https://github.com/user/repo
+  %(prog)s https://gist.github.com/user/0123456789abcdef
   %(prog)s --shallow https://github.com/user/large-repo
   %(prog)s --fork https://github.com/acme/widget
   %(prog)s --fork --fork-name greg/widget-mod https://github.com/acme/widget
@@ -2421,6 +2488,8 @@ Config file: ~/.config/shibuido/repo-clone/repo-clone-config.yaml
                              "(also: `repo-clone help-for-agents`)")
     parser.add_argument("--config", type=Path, default=None,
                         help="Use an alternative config file path")
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {__version__}")
 
     args = parser.parse_args()
 

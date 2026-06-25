@@ -101,6 +101,23 @@ discrepancies. Fixing in spec rather than introducing breaking changes.
 
 ---
 
+## 2026-06-25 — GitHub Gist path layout
+
+**Decision:** Clone GitHub Gists under
+`$base/github/_gist/<user-or-anonymous>/<gist-id>`.
+
+**Why:** Gists are Git repositories, but `gist.github.com/<id>` does not always
+carry an owner segment and should not collide with normal GitHub repositories
+under `$base/github/<user>/<repo>`. The `_gist` segment is visibly synthetic and
+keeps all Gists browsable in one place.
+
+**Considered:** `$base/gist.github.com/<user>/<id>` preserves the literal host
+but separates Gists from the GitHub base. `$base/github/<user>/_gist/<id>` keeps
+per-user locality but puts a synthetic namespace inside every normal user/org
+directory. The centralized `_gist` namespace is clearer and lower risk.
+
+---
+
 ## How to add an entry
 
 ```markdown

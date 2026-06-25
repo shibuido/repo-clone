@@ -23,6 +23,7 @@ while true; do read -p "url: " url; repo-clone "$url"; done
 Each repository lands exactly where you'd expect it:
 
 * `~/github/torvalds/linux`
+* `~/github/_gist/torvalds/1234567890abcdef`
 * `~/gitlab/inkscape/inkscape`
 * `~/huggingface.co/TheBloke/Llama-2-7B-GPTQ`
 
@@ -47,6 +48,9 @@ curl -L https://raw.githubusercontent.com/shibuido/repo-clone/master/repo-clone 
 # Clone
 repo-clone https://github.com/torvalds/linux
 # → ~/github/torvalds/linux  (cloned, submodules initialized)
+
+repo-clone https://gist.github.com/torvalds/1234567890abcdef
+# → ~/github/_gist/torvalds/1234567890abcdef
 ```
 
 Re-run the same command later and it updates cleanly.
@@ -117,7 +121,7 @@ repo-clone --watch --selection both    # Linux: clipboard + primary selection
 repo-clone --watch --dry-run -v        # Test detection without cloning
 ```
 
-Watch mode recognizes URLs from: GitHub, GitLab, Codeberg, Bitbucket,
+Watch mode recognizes URLs from: GitHub, GitHub Gist, GitLab, Codeberg, Bitbucket,
 Hugging Face, SourceHut. Want another host? Open an issue or PR.
 
 ---
@@ -239,6 +243,7 @@ Multi-account / multi-profile support is on the roadmap.
 | `--jsonl` | Emit JSONL on stdout |
 | `--help-for-agents` | Print agent-optimized help |
 | `--config PATH` | Use an alternative config file |
+| `--version` | Print version and exit |
 | `-n`, `--no-recursive` | Skip submodule handling |
 | `-s`, `--shallow` | Shallow clone (depth 1) |
 | `--depth N` | Custom depth |
@@ -273,6 +278,9 @@ Multi-account / multi-profile support is on the roadmap.
 * SSH: `git@github.com:user/repo.git`
 * HTTPS: `https://github.com/user/repo.git`
 * HTTPS without .git: `https://github.com/user/repo`
+* GitHub Gist: `https://gist.github.com/gist-id` or
+  `https://gist.github.com/user/gist-id`. On disk these land under
+  `~/github/_gist/anonymous/gist-id` or `~/github/_gist/user/gist-id`.
 * GitLab nested subgroups: `https://gitlab.com/group/subgroup/.../repo`
   (the `/-/` UI-resource sentinel is stripped, so URLs copied from a tree/blob/MR
   page also work). On disk these mirror the full chain:
