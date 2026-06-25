@@ -23,7 +23,7 @@ while true; do read -p "url: " url; repo-clone "$url"; done
 Each repository lands exactly where you'd expect it:
 
 * `~/github/torvalds/linux`
-* `~/github/_gist/torvalds/1234567890abcdef`
+* `~/github/torvalds/_gist/1234567890abcdef`
 * `~/gitlab/inkscape/inkscape`
 * `~/huggingface.co/TheBloke/Llama-2-7B-GPTQ`
 
@@ -50,7 +50,7 @@ repo-clone https://github.com/torvalds/linux
 # → ~/github/torvalds/linux  (cloned, submodules initialized)
 
 repo-clone https://gist.github.com/torvalds/1234567890abcdef
-# → ~/github/_gist/torvalds/1234567890abcdef
+# → ~/github/torvalds/_gist/1234567890abcdef
 ```
 
 Re-run the same command later and it updates cleanly.
@@ -280,7 +280,7 @@ Multi-account / multi-profile support is on the roadmap.
 * HTTPS without .git: `https://github.com/user/repo`
 * GitHub Gist: `https://gist.github.com/gist-id` or
   `https://gist.github.com/user/gist-id`. On disk these land under
-  `~/github/_gist/anonymous/gist-id` or `~/github/_gist/user/gist-id`.
+  `~/github/anonymous/_gist/gist-id` or `~/github/user/_gist/gist-id`.
   HTTPS Gist clones retry once with SSH if the first clone fails.
 * GitLab nested subgroups: `https://gitlab.com/group/subgroup/.../repo`
   (the `/-/` UI-resource sentinel is stripped, so URLs copied from a tree/blob/MR

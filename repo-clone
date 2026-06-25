@@ -40,7 +40,7 @@ from __future__ import annotations
 #   verifies one already exists), then clones both the source and the fork —
 #   two real directories, each with the correct `origin` remote, and the fork
 #   side gets an `upstream` remote pointing back at the source. GitHub Gists
-#   are the one layout exception: they live under $HOME/github/_gist/$owner/$id.
+#   are the one layout exception: they live under $HOME/github/$owner/_gist/$id.
 #   With --watch, it monitors the clipboard and clones anything that looks like
 #   a repo URL.
 #
@@ -1288,8 +1288,9 @@ class RepoInfo:
                               # GitHub: always [username] (length 1). GitLab supports
                               # nested subgroups, so e.g. gitlab-org/orbit/knowledge-graph
                               # yields ["gitlab-org", "orbit"]. Hugging Face: [username].
-                              # Gist: ["_gist", owner], so it lands under
-                              # github/_gist/<owner>/<gist-id>.
+                              # Gist: [owner, "_gist"], so it lands under
+                              # github/<owner>/_gist/<gist-id> (a user's gists
+                              # sit beside their normal repos).
     is_gist: bool = False     # True for GitHub Gist repositories.
 
 
@@ -1424,7 +1425,7 @@ def parse_git_url(url: str) -> RepoInfo:
                 is_ssh=True,
                 is_huggingface=False,
                 original_url=original_url,
-                namespace_path=[GIST_NAMESPACE, owner],
+                namespace_path=[owner, GIST_NAMESPACE],
                 is_gist=True,
             )
         if len(parts) < 2:
@@ -1463,7 +1464,7 @@ def parse_git_url(url: str) -> RepoInfo:
                 is_ssh=False,
                 is_huggingface=False,
                 original_url=original_url,
-                namespace_path=[GIST_NAMESPACE, owner],
+                namespace_path=[owner, GIST_NAMESPACE],
                 is_gist=True,
             )
         if len(path_parts) < 2:
@@ -2419,7 +2420,7 @@ Path layout invariant: every clone lives at $base/$host/$org/$repo where
   $host    = shortcode of hosting domain (github, gitlab, codeberg, ...; HF keeps full domain)
   $org     = source URL's org/user
   $repo    = source URL's repo name (no .git suffix)
-Special case: GitHub Gists live at $base/github/_gist/$user_or_anonymous/$gist_id.
+Special case: GitHub Gists live at $base/github/$user_or_anonymous/_gist/$gist_id.
 HTTPS Gist clone failures retry once with git@gist.github.com SSH.
 
 Companion tools for searching cloned content on disk:
