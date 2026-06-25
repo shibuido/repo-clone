@@ -8,6 +8,9 @@ Paste a URL, get a tidy clone exactly where you'd expect:
 repo-clone https://github.com/torvalds/linux
 # → ~/github/torvalds/linux
 
+repo-clone https://gist.github.com/torvalds/1234567890abcdef
+# → ~/github/_gist/torvalds/1234567890abcdef
+
 repo-clone --fork https://github.com/acme/widget
 # → ~/github/acme/widget        (upstream, ready to read)
 # → ~/github/<you>/widget        (your fork, cloned, with upstream remote)
@@ -18,8 +21,9 @@ repo-clone --watch
 
 ## Why
 
-* **Organize on the way in.** Every clone lands at `$HOME/$host/$org/$repo` —
-  predictable, greppable, fuzzy-searchable.
+* **Organize on the way in.** Every clone lands at `$HOME/$host/$org/$repo`
+  or, for Gists, `$HOME/github/_gist/$user/$gist_id` — predictable,
+  greppable, fuzzy-searchable.
 * **Idempotent.** Re-run the same command; it updates cleanly. No surprises.
 * **Fork-and-experiment loop without leaving the terminal.** `--fork` creates
   the fork, clones both sides, and wires the `upstream` remote.

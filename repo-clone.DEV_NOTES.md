@@ -22,6 +22,7 @@ ForkIdentity (dataclass)     - (target_org, fork_name, fork_clone_url)
 WatchConfig / WatchStats     - Watch mode
 
 parse_git_url()              - URL parsing (SSH, HTTPS, HuggingFace)
+_parse_gist_path()           - GitHub Gist owner/id parsing
 load_config()                - pyyaml-or-stdlib-subset YAML loader
 parse_yaml_subset()          - Stdlib YAML-subset fallback
 emit()                       - Structured output (human / JSONL)
@@ -91,6 +92,8 @@ If upstream changes submodule URLs in `.gitmodules`, local `.git/config` still h
 | HTTPS with .git | `https://github.com/u/r.git` | urlparse, strip .git |
 | HTTPS without .git | `https://github.com/u/r` | urlparse |
 | HTTP (insecure) | `http://github.com/u/r` | urlparse (works) |
+| GitHub Gist with owner | `https://gist.github.com/u/abc123` | Special case, stores at `github/_gist/u/abc123` |
+| GitHub Gist id-only | `https://gist.github.com/abc123` | Special case, stores at `github/_gist/anonymous/abc123` |
 | Hugging Face | `https://huggingface.co/u/m` | Special case, keeps full domain |
 
 ### Repository States
@@ -134,6 +137,17 @@ repo-clone --dry-run -v https://github.com/user/repo
 
 # Shallow clone
 repo-clone --shallow --base-dir tmp https://github.com/user/large-repo
+
+# GitHub Gist
+repo-clone --dry-run -v --base-dir tmp https://gist.github.com/user/abc123
+# Would clone to tmp/github/_gist/user/abc123
+
+# GitHub Gist without owner in URL
+repo-clone --dry-run -v --base-dir tmp https://gist.github.com/abc123
+# Would clone to tmp/github/_gist/anonymous/abc123
+
+# Version
+repo-clone --version
 ```
 
 ### Stdlib YAML-subset config
