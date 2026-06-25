@@ -25,6 +25,17 @@ https://gist.github.com/<gist-id>.git
 https://gist.github.com/<user>/<gist-id>.git
 ```
 
+For HTTPS Gist inputs, repo-clone tries the HTTPS clone URL first. If that clone
+fails, it retries once with the equivalent SSH URL:
+
+```text
+git@gist.github.com:<gist-id>.git
+git@gist.github.com:<user>/<gist-id>.git
+```
+
+This keeps public and secret-but-public Gists frictionless while still allowing
+private Gists to work when the user's GitHub SSH key has access.
+
 ## Why
 
 Gists are Git repositories, but their URL shape differs from normal GitHub

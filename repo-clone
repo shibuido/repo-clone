@@ -134,7 +134,7 @@ from typing import Optional, List, Tuple
 from enum import IntEnum
 
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 # Exit codes
@@ -1510,6 +1510,18 @@ def normalize_clone_url(info: RepoInfo) -> str:
         return f"https://{info.hosting}/{ns}/{info.repo}.git"
 
 
+def gist_ssh_fallback_url(info: RepoInfo) -> Optional[str]:
+    """Return SSH fallback URL for an HTTPS Gist clone, if applicable."""
+    if not info.is_gist or info.is_ssh:
+        return None
+    owner = info.username
+    if owner == GIST_ANONYMOUS_OWNER:
+        gist_path = info.repo
+    else:
+        gist_path = f"{owner}/{info.repo}"
+    return f"git@{GIST_HOST}:{gist_path}.git"
+
+
 # ---- Config file loading ----
 # With the dataclasses and URL helpers in place, we can load the config file.
 # The config is optional — missing file means empty dict, not an error. If
@@ -2252,8 +2264,8 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
             clone_args.append("--shallow-submodules")
 
     clone_url = normalize_clone_url(info)
-    clone_args.append(clone_url)
-    clone_args.append(info.repo)
+    clone_args_base = list(clone_args)
+    clone_args = clone_args_base + [clone_url, info.repo]
 
     # Execute clone
     try:
@@ -2267,6 +2279,25 @@ def clone_repo(info: RepoInfo, options: CloneOptions) -> int:
         print(f"Successfully cloned to: {repo_path}", file=sys.stderr)
         return ExitCode.SUCCESS
     except subprocess.CalledProcessError:
+        fallback_url = gist_ssh_fallback_url(info)
+        if fallback_url:
+            log_warn(
+                "HTTPS Gist clone failed; retrying with SSH. "
+                "Ensure your GitHub SSH key has access if this is a private Gist."
+            )
+            fallback_args = clone_args_base + [fallback_url, info.repo]
+            try:
+                print(f"Cloning {fallback_url} to {repo_path}", file=sys.stderr)
+                run_git(
+                    fallback_args,
+                    cwd=parent_dir,
+                    verbosity=options.verbosity,
+                    dry_run=options.dry_run
+                )
+                print(f"Successfully cloned to: {repo_path}", file=sys.stderr)
+                return ExitCode.SUCCESS
+            except subprocess.CalledProcessError:
+                return ExitCode.CLONE_FAILED
         return ExitCode.CLONE_FAILED
 
 
@@ -2389,6 +2420,7 @@ Path layout invariant: every clone lives at $base/$host/$org/$repo where
   $org     = source URL's org/user
   $repo    = source URL's repo name (no .git suffix)
 Special case: GitHub Gists live at $base/github/_gist/$user_or_anonymous/$gist_id.
+HTTPS Gist clone failures retry once with git@gist.github.com SSH.
 
 Companion tools for searching cloned content on disk:
   find-snapshot     # cached daily find index

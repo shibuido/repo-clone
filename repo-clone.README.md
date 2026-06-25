@@ -281,6 +281,7 @@ Multi-account / multi-profile support is on the roadmap.
 * GitHub Gist: `https://gist.github.com/gist-id` or
   `https://gist.github.com/user/gist-id`. On disk these land under
   `~/github/_gist/anonymous/gist-id` or `~/github/_gist/user/gist-id`.
+  HTTPS Gist clones retry once with SSH if the first clone fails.
 * GitLab nested subgroups: `https://gitlab.com/group/subgroup/.../repo`
   (the `/-/` UI-resource sentinel is stripped, so URLs copied from a tree/blob/MR
   page also work). On disk these mirror the full chain:

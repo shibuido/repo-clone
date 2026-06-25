@@ -94,6 +94,7 @@ If upstream changes submodule URLs in `.gitmodules`, local `.git/config` still h
 | HTTP (insecure) | `http://github.com/u/r` | urlparse (works) |
 | GitHub Gist with owner | `https://gist.github.com/u/abc123` | Special case, stores at `github/_gist/u/abc123` |
 | GitHub Gist id-only | `https://gist.github.com/abc123` | Special case, stores at `github/_gist/anonymous/abc123` |
+| GitHub Gist HTTPS failure | `https://gist.github.com/u/private` | Retries once as `git@gist.github.com:u/private.git` |
 | Hugging Face | `https://huggingface.co/u/m` | Special case, keeps full domain |
 
 ### Repository States
