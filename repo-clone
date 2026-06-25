@@ -1362,14 +1362,23 @@ def is_huggingface_url(url: str) -> bool:
 def _parse_gist_path(parts: List[str], url: str) -> Tuple[str, str]:
     """Return (owner, gist_id) for gist.github.com path parts."""
     if len(parts) == 1:
-        return (GIST_ANONYMOUS_OWNER, parts[0].removesuffix(".git"))
-    if len(parts) == 2:
-        return (parts[0], parts[1].removesuffix(".git"))
-    raise ValueError(
-        f"Invalid GitHub Gist URL: {url}\n"
-        "Expected https://gist.github.com/<gist-id> or "
-        "https://gist.github.com/<user>/<gist-id>"
+        owner, gist_id, anonymous = GIST_ANONYMOUS_OWNER, parts[0].removesuffix(".git"), True
+    elif len(parts) == 2:
+        owner, gist_id, anonymous = parts[0], parts[1].removesuffix(".git"), False
+    else:
+        raise ValueError(
+            f"Invalid GitHub Gist URL: {url}\n"
+            "Expected https://gist.github.com/<gist-id> or "
+            "https://gist.github.com/<user>/<gist-id>"
+        )
+    # -v: make the gist special-casing visible — host match, owner-vs-anonymous,
+    # and the resulting on-disk layout (owner first, then the _gist bucket).
+    anon_note = " (anonymous — no owner in URL)" if anonymous else ""
+    log_info(
+        f"GitHub Gist on {GIST_HOST}: owner={owner}{anon_note}, id={gist_id} "
+        f"-> {GIST_SHORTCODE}/{owner}/{GIST_NAMESPACE}/{gist_id}"
     )
+    return (owner, gist_id)
 
 
 def parse_git_url(url: str) -> RepoInfo:
@@ -1500,6 +1509,8 @@ def normalize_clone_url(info: RepoInfo) -> str:
             gist_path = info.repo
         else:
             gist_path = f"{owner}/{info.repo}"
+        scheme = "ssh" if info.is_ssh else "https"
+        log_debug(f"Gist clone URL scheme: {scheme} (path={gist_path})")
         if info.is_ssh:
             return f"git@{GIST_HOST}:{gist_path}.git"
         return f"https://{GIST_HOST}/{gist_path}.git"
